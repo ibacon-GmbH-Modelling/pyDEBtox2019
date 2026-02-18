@@ -377,7 +377,9 @@ class reproclass(dataclass):
             case 0:
                 pass
             case 1:
-                pass
+                for i in range(self.dataarray.shape[0]):
+                    Rtmp     = self.dataarray[i,:];      # extract one individual
+                    #... continue.. here
             case 2:
                 for i in range(self.dataarray.shape[0]): # run through individuals
                     Rtmp     = self.dataarray[i,:];      # extract one individual
