@@ -4,7 +4,6 @@ classes and functions for the DEBtox2019 handling of data and parameters
 
 import numpy as np
 import matplotlib.pyplot as plt
-from .parspace import parspace as ps
 from .readin import completedataset
 
 import multiprocessing as mp
@@ -14,6 +13,7 @@ n_cores = psutil.cpu_count(logical=False) # to have the number of physical cores
 
 def plot_DEBresults(parspaceres, CI=True, multicore=True):
     print("plotting the results")
+    # assumes a single dataset for now
     ccl = parspaceres.model.concstruct_list[0]
     lcl = parspaceres.model.lengthstruct_list[0]
     rcl = parspaceres.model.reprostruct_list[0]
@@ -30,7 +30,8 @@ def plot_DEBresults(parspaceres, CI=True, multicore=True):
     for i in range(len(treatmentnames)):
         sol.append(parspaceres.model.calc_model(parspaceres.model.concstruct_list[0].concarray[i],
                                       parspaceres.model.concstruct_list[0].time,
-                                      10**(parspaceres.model.parvals)*parspaceres.model.islog + parspaceres.model.parvals*(~parspaceres.model.islog),
+                                      10**(parspaceres.model.parvals)*parspaceres.model.islog + 
+                                           parspaceres.model.parvals*(~parspaceres.model.islog),
                                       parspaceres.model.moa,
                                       parspaceres.model.feedb,
                                       tevals))
@@ -119,7 +120,55 @@ def build_dataset_variants(ccl, lcl, rcl, scl, control_type='both'):
     control_ds = full_ds.subset(control_selector)
     return full_ds, control_ds
 
+def preset_toxlimits(debparameterclass, moa, feedb, concclass):
+    '''
+    This function automatically estimates the lower and upper boundary
+    of the toxicity parameters based on exposure and feedback mechanisms 
+    '''
+    # set limits of the parameters
+    treatments=concclass.concmax[concclass.concmax>0]
+    
+    # kd parameter
+    kdlowlim = 0.01
+    kduplim = 10
+    debparameterclass.full_lowlim[debparameterclass.full_names=='kd'] = kdlowlim
+    debparameterclass.full_uplim[debparameterclass.full_names=='kd'] = kduplim
+    
+    # zb parameter
+    debparameterclass.full_lowlim[debparameterclass.full_names=='zb']  = treatments.min()*(1-np.exp(-kdlowlim*(4./24.)))
+    debparameterclass.full_uplim[debparameterclass.full_names=='zb']  = treatments.max()*0.99
 
+    # zs parameter
+    debparameterclass.full_lowlim[debparameterclass.full_names=='zs']  = treatments.min()*(1-np.exp(-kdlowlim*(4./24.)))
+    debparameterclass.full_uplim[debparameterclass.full_names=='zs']  = treatments.max()*0.99
+    # for this specific combination, damage can be larger than external concentration
+    if feedb[0] == 1 & feedb[1] == 0:
+        debparameterclass.full_uplim[debparameterclass.full_names=='zb'] = 2*treatments.max() # so increase the threshold
+        debparameterclass.full_uplim[debparameterclass.full_names=='zs']  = 2*treatments.max()
+    
+    # bb and bs parameters. These are usually in log scale, so the limits need to be given in log scale as well.
+    bslowlim = -np.log(0.9) / (treatments.max()*concclass.time.max())
+    bsuplim = (2**2*0.95) /(0.01*treatments.max()*np.exp(-kdlowlim*concclass.time.max()*0.5))
+    debparameterclass.full_lowlim[debparameterclass.full_names=='bs']  = bslowlim
+    debparameterclass.full_uplim[debparameterclass.full_names=='bs']   = bsuplim
+    if debparameterclass.full_isfree[debparameterclass.full_names=='bb'] == 1:
+        if moa[0] == 1:
+            bblowlim  = 0.2 / treatments.max()
+            bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+        elif moa[1] == 1:
+            bblowlim = 0.2 / treatments.max()
+            bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+        elif moa[2] == 1:
+            bblowlim = 0.2 / treatments.max()
+            bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+        elif moa[3] == 1:
+            bblowlim = 0.5 / treatments.max()
+            bbuplim = 2000 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+        elif moa[4] == 1:
+            bblowlim = 0.2 / treatments.max()
+            bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+        debparameterclass.full_lowlim[debparameterclass.full_names=='bb'] = bblowlim
+        debparameterclass.full_uplim[debparameterclass.full_names=='bb'] = bbuplim
 
 class DEBparameters:
     def __init__(self, DEBpars):

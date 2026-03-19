@@ -24,7 +24,6 @@ if __name__ == "__main__":
 
     moas = np.array([0,0,0,1,0])
     feedbs =  np.array([0,0,0,0])
-    tevals = np.linspace(0,21,100)
 
     Cdata = pd.read_csv("Test_Cdata.txt", sep="\s+", header=None)
     ccl = readin.concclass(Cdata.to_numpy(),"","ug/L")
@@ -40,46 +39,14 @@ if __name__ == "__main__":
     scl = readin.survdataclass(Sdata.to_numpy())
 
     # isolate the controls    
-    full_ds, control_ds = readin.build_dataset_variants(ccl, lcl, rcl, scl, control_type='both')
+    full_ds, control_ds = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='both')
     
     # take only the survival data from the controls
-    _,hbonly = readin.build_dataset_variants(ccl=ccl, lcl=None,rcl=None,scl=scl,control_type='both')
+    _,hbonly = dt2019.build_dataset_variants(ccl=ccl, lcl=None,rcl=None,scl=scl,control_type='both')
 
-    # if fit_mode == "controls":
-    #     ds_list = [control_ds]         # only controls
-    # elif fit_mode == "full":
-    #     ds_list = [full_ds]            # all treatments
-    # elif fit_mode == "both":
-    #     ds_list = [control_ds, full_ds]  # (advanced) multi-scenario joint fit
-    # else:
-    #     raise ValueError("fit_mode must be 'controls' | 'full' | 'both'.")
+    # set the parameter limits to start the grid search
+    dt2019.preset_toxlimits(debparameters, moas, feedbs, ccl)
 
-
-    # datadict = compile_dataset_dict(ccl, scl, lcl, rcl,1)
-    # datadict_c = compile_dataset_dict(ccl_c, scl_c, lcl_c, rcl_c,1)
-    # fulldataset = completedataset(concdata=ccl,lendata=lcl,reprodata=rcl,survdata=scl)
-    # controldataset = completedataset(concdata=ccl_c,lendata=lcl_c,reprodata=rcl_c,survdata=scl_c)
-
-
-    # preparation for fit of the physiological model only
-    treatments=ccl.concmax[ccl.concmax>0]
-    debparameters.full_lowlim[debparameters.full_names=='zb']  = treatments.min()*(1-np.exp(-0.01*(4./24.)))
-    debparameters.full_uplim[debparameters.full_names=='zb']  = treatments.max()*0.99
-    debparameters.full_lowlim[debparameters.full_names=='zs']  = treatments.min()*(1-np.exp(-0.01*(4./24.)))
-    debparameters.full_uplim[debparameters.full_names=='zs']  = treatments.max()*0.99
-
-    # these are in log10 scale
-    debparameters.full_lowlim[debparameters.full_names=='bb']  = np.log10(0.2 / treatments.max())
-    debparameters.full_uplim[debparameters.full_names=='bb']   = np.log10(200 / (treatments.max() * (1-np.exp(-0.01*ccl.time.max()))))
-    debparameters.full_lowlim[debparameters.full_names=='bs']  = np.log10(-np.log(0.9) / (treatments.max()*ccl.time.max()))
-    debparameters.full_uplim[debparameters.full_names=='bs']   = np.log10((2**2*0.95) /(0.01*treatments.max()*np.exp(-0.01*ccl.time.max()*0.5)))
-
-    # debparameters.full_list = np.array([
-    #     2.0000e-02, 1.0000e+00, 8.0000e-01, 6.4000e-01, 5.0000e+00,
-    #     8.8000e-01, 2.3120e+00, 3.1254e+00, 1.416e-01, 9.7293e+00,
-    #     1.0000e+00, 4.8140e-03, 1.0000e+00, 0.0000e+00, 0.0000e+00,
-    #     0.0000e+00, 3.610e-02, 1.74237e+01, 7.80e-02, 8.375e-01,
-    #     1.9070e-01])
     debmodeltest = mm.DEBtox2019models([full_ds],
                                        debparameters.full_list,
                                        debparameters.full_names,
@@ -87,10 +54,14 @@ if __name__ == "__main__":
                                        debparameters.full_isfree, 
                                        debparameters.full_lowlim,
                                        debparameters.full_uplim,
-                                       moas, feedbs, Tbp=3,
+                                       moas, feedbs, Tbp=0,
                                        solver='LSODA')
     
     # transform in log scale when needed avoiding nan values due to log(0)
+    # this is needed only here as we are calling the likelihood externally.
+    # In the standard workflow, the likelihood is called by the parspace class
+    # that takes care internally to transform the parameters in log scale when 
+    # needed and to transform them back when calling the model.
     listparswlog = debparameters.full_list.copy()
     newlistpars = np.zeros_like(listparswlog)
     for i,par in enumerate(listparswlog):
@@ -101,7 +72,7 @@ if __name__ == "__main__":
     print(lk)
     dt2019.plot_DEBresults(parspace,CI=False,multicore=False) 
     
-    
+    print(debparameters.full_lowlim)
     debparameters.set_free_onlyone("hb", isfree=True)
     debhbmodel = mm.DEBtox2019models([hbonly],
                                     debparameters.full_list,
@@ -112,7 +83,8 @@ if __name__ == "__main__":
                                     debparameters.full_uplim,
                                     moas, feedbs, Tbp=3,solver='LSODA')
     parspacehb = ps.PyParspace(ps.SettingParspace(0,1), debhbmodel)
-    parspacehb.profile =1
+    parspacehb.profile =0
+    print(debhbmodel.parbound_lower)
     startt = time.time()
     parspacehb.run_parspace()
     endt = time.time()
@@ -131,7 +103,7 @@ if __name__ == "__main__":
                                        debparameters.full_isfree, 
                                        debparameters.full_lowlim,
                                        debparameters.full_uplim,
-                                       moas, feedbs, Tbp=3,solver='LSODA')
+                                       moas, feedbs, Tbp=0,solver='LSODA')
 
     parspace = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)  
     lk = debmodeltest.log_likelihood(debparameters.full_list[debmodeltest.posfree],debparameters.full_list,debmodeltest.posfree)
@@ -143,14 +115,14 @@ if __name__ == "__main__":
     # ##     lk = debmodeltest.log_likelihood(debparameters.full_list[debmodeltest.posfree],debparameters.full_list,debmodeltest.posfree)
     # ## print("Time for 1000 likelihood evaluations: ", time.time()-begintime)
 
-    parspace.profile =1
+    parspace.profile =0
     startt = time.time()
     parspace.run_parspace()
     endt = time.time()
     print("Time for physiological model fit: ", endt-startt)
     dt2019.plot_DEBresults(parspace,CI=True,multicore=True)
     
-    '''
+    
     debparameters.full_list = parspace.model.parvals
     debparameters.fixfree_physio_pars(isfree=False)
     debparameters.fixfree_tox_pars(isfree=True)
@@ -162,10 +134,10 @@ if __name__ == "__main__":
                                        debparameters.full_isfree, 
                                        debparameters.full_lowlim,
                                        debparameters.full_uplim,
-                                       moas, feedbs, Tbp=3,solver='LSODA')
+                                       moas, feedbs, Tbp=0,solver='LSODA')
     
     parspace_tox = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)
-    parspace_tox.profile =1
+    parspace_tox.profile =0
     startt = time.time()
     parspace_tox.run_parspace()
     endt = time.time()
@@ -194,4 +166,4 @@ if __name__ == "__main__":
     # parspacehb = ps.PyParspace.load_class("test_hbfit.pkl")
     # parspacehb.model.solver = 'LSODA'
     # plot_DEBresults(parspacehb, CI=True, multicore=False)
-    '''
+ 

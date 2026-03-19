@@ -13,7 +13,7 @@
         "rB": {"value": 0.14226, "fixed": false, "islog": false, "min": 0.002, "max": 0.3},
         "Rm": {"value": 9.6917, "fixed": false, "islog": false, "min": 1.0, "max": 20.0},
         "f":  {"value": 1.0,  "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
-        "hb": {"value": 0.004814, "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
+        "hb": {"value": 0.0048, "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
         "a":  {"value": 1.0,  "fixed": true, "islog": false, "min": 0.0, "max": 10.0}
     },
     "special_cases": {
@@ -22,10 +22,10 @@
         "Tlag": {"value": 0.0, "fixed": true, "islog": false, "min": 0.0, "max": 10.0}
     },
     "tox_parameters": {
-        "kd": {"value": 0.03253, "fixed": false, "islog": true, "min": -2.0, "max": 1.0},
+        "kd": {"value": 0.03253, "fixed": false, "islog": true, "min": 0.01, "max": 10.0},
         "bb": {"value": 24.90, "fixed": false, "islog": true, "min": 0.01, "max": 1.0},
         "zb": {"value": 0.07712, "fixed": false, "islog": false, "min": 0.0, "max": 1.0},
-        "bs": {"value": 0.9113, "fixed": false, "islog": true, "min": 0.0, "max": 1.0},
+        "bs": {"value": 0.9113, "fixed": false, "islog": true, "min": 0.01, "max": 1.0},
         "zs": {"value": 0.1760, "fixed": false, "islog": false, "min": 0.0, "max": 1.0}
     }
 }

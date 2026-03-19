@@ -252,6 +252,9 @@ class DEBtox2019models:
         self.posfree = np.argwhere(self.isfree == 1).flatten()  # positions of the free parameters in the parameter vector
         self.parbound_lower = np.array(parbound_lower) # make sure these are numpy arrays
         self.parbound_upper = np.array(parbound_upper) # make sure these are numpy arrays
+        islogindex = np.argwhere(self.islog==True).flatten()
+        self.parbound_lower[islogindex] = np.log10(self.parbound_lower[islogindex])
+        self.parbound_upper[islogindex] = np.log10(self.parbound_upper[islogindex])
         self.moa = moa
         self.feedb = feedb
         self.Tbp = Tbp
