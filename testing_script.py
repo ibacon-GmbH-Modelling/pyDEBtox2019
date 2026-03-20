@@ -72,7 +72,6 @@ if __name__ == "__main__":
     print(lk)
     dt2019.plot_DEBresults(parspace,CI=False,multicore=False) 
     
-    print(debparameters.full_lowlim)
     debparameters.set_free_onlyone("hb", isfree=True)
     debhbmodel = mm.DEBtox2019models([hbonly],
                                     debparameters.full_list,
@@ -82,6 +81,7 @@ if __name__ == "__main__":
                                     debparameters.full_lowlim,
                                     debparameters.full_uplim,
                                     moas, feedbs, Tbp=3,solver='LSODA')
+    '''
     parspacehb = ps.PyParspace(ps.SettingParspace(0,1), debhbmodel)
     parspacehb.profile =0
     print(debhbmodel.parbound_lower)
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     parspace_tox.run_parspace()
     endt = time.time()
     print("Time for tox model fit: ", endt-startt)
-
+    dt2019.plot_DEBresults(parspace_tox, CI=False, multicore=False)
     # # time with parallel computation
     # # ~200 seconds (physio part)
     # # 1915.45 seconds (tox part)
@@ -166,4 +166,4 @@ if __name__ == "__main__":
     # parspacehb = ps.PyParspace.load_class("test_hbfit.pkl")
     # parspacehb.model.solver = 'LSODA'
     # plot_DEBresults(parspacehb, CI=True, multicore=False)
- 
+ '''

@@ -151,24 +151,24 @@ def preset_toxlimits(debparameterclass, moa, feedb, concclass):
     bsuplim = (2**2*0.95) /(0.01*treatments.max()*np.exp(-kdlowlim*concclass.time.max()*0.5))
     debparameterclass.full_lowlim[debparameterclass.full_names=='bs']  = bslowlim
     debparameterclass.full_uplim[debparameterclass.full_names=='bs']   = bsuplim
-    if debparameterclass.full_isfree[debparameterclass.full_names=='bb'] == 1:
-        if moa[0] == 1:
-            bblowlim  = 0.2 / treatments.max()
-            bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-        elif moa[1] == 1:
-            bblowlim = 0.2 / treatments.max()
-            bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-        elif moa[2] == 1:
-            bblowlim = 0.2 / treatments.max()
-            bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-        elif moa[3] == 1:
-            bblowlim = 0.5 / treatments.max()
-            bbuplim = 2000 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-        elif moa[4] == 1:
-            bblowlim = 0.2 / treatments.max()
-            bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-        debparameterclass.full_lowlim[debparameterclass.full_names=='bb'] = bblowlim
-        debparameterclass.full_uplim[debparameterclass.full_names=='bb'] = bbuplim
+    # if debparameterclass.full_isfree[debparameterclass.full_names=='bb'] == 1:
+    if moa[0] == 1:
+        bblowlim  = 0.2 / treatments.max()
+        bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+    elif moa[1] == 1:
+        bblowlim = 0.2 / treatments.max()
+        bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+    elif moa[2] == 1:
+        bblowlim = 0.2 / treatments.max()
+        bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+    elif moa[3] == 1:
+        bblowlim = 0.5 / treatments.max()
+        bbuplim = 2000 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+    elif moa[4] == 1:
+        bblowlim = 0.2 / treatments.max()
+        bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
+    debparameterclass.full_lowlim[debparameterclass.full_names=='bb'] = bblowlim
+    debparameterclass.full_uplim[debparameterclass.full_names=='bb'] = bbuplim
 
 class DEBparameters:
     def __init__(self, DEBpars):
