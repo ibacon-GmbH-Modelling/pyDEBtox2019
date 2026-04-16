@@ -28,8 +28,8 @@ def plot_DEBresults(parspaceres, CI=True, multicore=True):
     lenendpoints = np.sum([1 for cl in [ccl,lcl,rcl,scl] if cl is not None])
     ax = fig.subplots(lenendpoints,len(treatmentnames))
     for i in range(len(treatmentnames)):
-        sol.append(parspaceres.model.calc_model(parspaceres.model.concstruct_list[0].concarray[i],
-                                      parspaceres.model.concstruct_list[0].time,
+        sol.append(parspaceres.model.calc_model(parspaceres.model.concstruct_list[0].concarraytr[i],
+                                      parspaceres.model.concstruct_list[0].timetr,
                                       10**(parspaceres.model.parvals)*parspaceres.model.islog + 
                                            parspaceres.model.parvals*(~parspaceres.model.islog),
                                       parspaceres.model.moa,
@@ -59,7 +59,7 @@ def plot_DEBresults(parspaceres, CI=True, multicore=True):
             low = solci.min(axis=0)
             upp = solci.max(axis=0)
         ### concentration and damage plot
-        ax[0,i].plot(ccl.time,ccl.concarray[i])
+        ax[0,i].plot(ccl.timetr,ccl.concarraytr[i])
         ax[0,i].plot(tevals,sol[i][0])
         if CI:
             ax[0,i].fill_between(tevals, low[:,0], upp[:,0], color='gray', alpha=0.5)

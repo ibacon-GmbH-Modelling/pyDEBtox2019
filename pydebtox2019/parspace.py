@@ -233,16 +233,16 @@ class SettingParspace:
         
         if rough:
             self.tries = 8
-            self.n_conf_all = np.array([[500, 500],
-                                        [2500, 1500],
-                                        [5000, 2000],
-                                        [7000, 3000],
-                                        [10000, 5000],
-                                        [15000, 7500],
-                                        [15000, 7500],
-                                        [15000, 7500],
-                                        [15000, 7500],
-                                        [15000, 7500]])
+            self.n_conf_all = np.array([[100, 100],
+                                        [250, 150],
+                                        [500, 200],
+                                        [700, 300],
+                                        [1000, 500],
+                                        [1500, 750],
+                                        [1500, 750],
+                                        [1500, 750],
+                                        [1500, 750],
+                                        [1500, 750]])
             self.gap_extra  = 2*0.25; # the gap distance between profile and sample that triggers resampling
             self.n_max = 4;  # maximum number of rounds for the algorithm (default 12)
 
@@ -811,8 +811,9 @@ class PyParspace:
                         if ind_low.size > 0:
                             # need to interpolate to find the exact value. Interpolation done only on the 
                             # two points around the crossing
-                            val=np.interp(0, np.array([prof_tst[ind_low-1,-1], prof_tst[ind_low,-1]]), 
-                                             np.array([prof_tst[ind_low-1,i],prof_tst[ind_low,i]]))
+                            # IN NP.INTERP THE X VALUES NEED TO BE IN ASCENDING ORDER, SO I NEED TO FLIP THE ORDER OF THE POINTS
+                            val=np.interp(0, np.array([prof_tst[ind_low,-1], prof_tst[ind_low-1,-1]]), 
+                                             np.array([prof_tst[ind_low,i],prof_tst[ind_low-1,i]]))
                             res_parspace[i,1] = (10**val*self.model.islog[self.posfree[i]] + 
                                                  val*(1-self.model.islog[self.posfree[i]]))
                     if prof_tst[-1,-1] < 0:

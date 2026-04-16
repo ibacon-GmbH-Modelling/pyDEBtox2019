@@ -16,7 +16,7 @@ import pydebtox2019.readin as readin
 if __name__ == "__main__":
 
     # Open JSON file
-    with open('input_pars.json') as json_file:
+    with open('input_pars_tbp3.json') as json_file:
         DEBpars = json.load(json_file)
 
     debparameters = dt2019.DEBparameters(DEBpars)
@@ -31,12 +31,16 @@ if __name__ == "__main__":
 
     Ldata = pd.read_csv("Test_Ldata.txt", sep="\s+", header=None)
     lcl = readin.lengthdataclass(Ldata.to_numpy())
+    lcl.plot_data()
 
-    Rdata = pd.read_csv("Test_Rdata.txt", sep="\s+", header=None)
+    Rdata = pd.read_csv("Test_Rdata_opt1.txt", sep="\s+", header=None)
     rcl = readin.reproclass(Rdata.to_numpy(), reprocase='individual',optcase=2)
+    rcl.plot_data_cumulative()
 
     Sdata = pd.read_csv("Test_Sdata.txt", sep="\s+", header=None)
     scl = readin.survdataclass(Sdata.to_numpy())
+    scl.plot_data(scaleto1=True, label="suviving fraction")
+
 
     # isolate the controls    
     full_ds, control_ds = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='both')
@@ -54,7 +58,8 @@ if __name__ == "__main__":
                                        debparameters.full_isfree, 
                                        debparameters.full_lowlim,
                                        debparameters.full_uplim,
-                                       moas, feedbs, Tbp=0,
+                                       moas, feedbs, Tbp=3,
+                                       breaktime=1,
                                        solver='LSODA')
     
     # transform in log scale when needed avoiding nan values due to log(0)
@@ -71,7 +76,7 @@ if __name__ == "__main__":
     lk = debmodeltest.log_likelihood(newlistpars[debmodeltest.posfree],newlistpars,debmodeltest.posfree)
     print(lk)
     dt2019.plot_DEBresults(parspace,CI=False,multicore=False) 
-    
+    '''
     debparameters.set_free_onlyone("hb", isfree=True)
     debhbmodel = mm.DEBtox2019models([hbonly],
                                     debparameters.full_list,
@@ -81,7 +86,8 @@ if __name__ == "__main__":
                                     debparameters.full_lowlim,
                                     debparameters.full_uplim,
                                     moas, feedbs, Tbp=3,solver='LSODA')
-    '''
+    
+    
     parspacehb = ps.PyParspace(ps.SettingParspace(0,1), debhbmodel)
     parspacehb.profile =0
     print(debhbmodel.parbound_lower)
@@ -126,7 +132,9 @@ if __name__ == "__main__":
     debparameters.full_list = parspace.model.parvals
     debparameters.fixfree_physio_pars(isfree=False)
     debparameters.fixfree_tox_pars(isfree=True)
-
+    '''
+    debparameters.fixfree_physio_pars(isfree=False)
+    debparameters.fixfree_tox_pars(isfree=True)
     debmodeltest = mm.DEBtox2019models([full_ds],
                                        debparameters.full_list,
                                        debparameters.full_names,
@@ -134,10 +142,12 @@ if __name__ == "__main__":
                                        debparameters.full_isfree, 
                                        debparameters.full_lowlim,
                                        debparameters.full_uplim,
-                                       moas, feedbs, Tbp=0,solver='LSODA')
+                                       moas, feedbs, Tbp=3,
+                                       breaktime=1,
+                                       solver='LSODA')
     
     parspace_tox = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)
-    parspace_tox.profile =0
+    parspace_tox.profile =0  # this has no effect because in the parspace class we read from the setting attribute
     startt = time.time()
     parspace_tox.run_parspace()
     endt = time.time()
@@ -166,4 +176,3 @@ if __name__ == "__main__":
     # parspacehb = ps.PyParspace.load_class("test_hbfit.pkl")
     # parspacehb.model.solver = 'LSODA'
     # plot_DEBresults(parspacehb, CI=True, multicore=False)
- '''

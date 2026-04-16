@@ -375,11 +375,164 @@ class reproclass(dataclass):
             "than neonate release")            
         match optcase:
             case 0:
-                pass
+                # copilot did this. TODO: check if it works properly
+                # Extract reproduction array (rows = individuals)
+                R = np.copy(self.dataarray)
+                t = self.time
+                all_id = self.treatmentsnames
+                c_u = self.uniquetreats
+
+                max_broods = 0
+                interm = [None] * R.shape[0]
+                brdsz = [None] * R.shape[0]
+
+                # -------------------------------------------------
+                # 1) Loop over individuals: compute intermoult and brood size
+                # -------------------------------------------------
+                for i in range(R.shape[0]):
+                    Rtmp = R[i, :].copy()
+
+                    # indices of -1 (first egg)
+                    ind_eggs = np.where(Rtmp == -1)[0]
+
+                    # "moults": non-zero and non-nan observations
+                    ind_moults = np.where((Rtmp != 0) & ~np.isnan(Rtmp))[0]
+
+                    # replace -1 → 0 for brood-size calculations
+                    if ind_eggs.size > 0:
+                        Rtmp[ind_eggs] = 0
+
+                    # intermoult periods
+                    interm[i] = np.diff(t[ind_moults]) if ind_moults.size > 1 else np.array([])
+
+                    # brood sizes at moults
+                    if ind_moults.size > 0:
+                        b = Rtmp[ind_moults]
+                        # remove the first brood (which is zero)
+                        brdsz[i] = b[1:] if b.size > 1 else np.array([])
+                    else:
+                        brdsz[i] = np.array([])
+
+                    max_broods = max(max_broods, len(interm[i]))
+
+                # -------------------------------------------------
+                # 2) Build output matrices (interm_out, brdsz_out)
+                # -------------------------------------------------
+                interm_out = np.full((max_broods, R.shape[0]), np.nan)
+                brdsz_out  = np.full((max_broods, R.shape[0]), np.nan)
+
+                for i in range(R.shape[0]):
+                    ilen = len(interm[i])
+                    blen = len(brdsz[i])
+                    interm_out[:ilen, i] = interm[i]
+                    brdsz_out[:blen, i]  = brdsz[i]
+
+                # -------------------------------------------------
+                # 3) Print global summary
+                # -------------------------------------------------
+                print("\nChecking the data set regarding the intermoult period")
+                print(f"Overall mean intermoult time  : {np.nanmean(interm_out):.4g}")
+                print(f"Overall std of intermoult time: {np.nanstd(interm_out):.4g}")
+                print(" ")
+
+                # -------------------------------------------------
+                # 4) Per-treatment means (Rmim = intermoults, Rbrdsz = brood size)
+                # -------------------------------------------------
+                # matrices have (max_broods+1) rows, first row for identifiers
+                Rmim = np.full((max_broods + 1, len(c_u) + 1), np.nan)
+                Rbrdsz = np.full_like(Rmim, np.nan)
+
+                # first row: [-1, c_u]
+                Rmim[0, 0] = -1
+                Rmim[0, 1:] = c_u
+                Rbrdsz[0, :] = Rmim[0, :]
+
+                # first column = brood number
+                Rmim[1:, 0] = np.arange(1, max_broods + 1)
+                Rbrdsz[1:, 0] = np.arange(1, max_broods + 1)
+
+                # fill per‑treatment means
+                for j, cu in enumerate(c_u):
+                    inds = np.where(all_id == cu)[0]   # replicates belonging to treatment cu
+                    Rmim[1:, j + 1]  = np.nanmean(interm_out[:, inds], axis=1)
+                    Rbrdsz[1:, j + 1] = np.nanmean(brdsz_out[:, inds], axis=1)
+
+                # -------------------------------------------------
+                # 5) Display treatment-level matrices
+                # -------------------------------------------------
+                print("Mean intermoult period across broods and across treatments")
+                print("------------------------------------------------------------")
+                print(Rmim)
+
+                print("Mean brood size across broods and across treatments")
+                print("------------------------------------------------------------")
+                print(Rbrdsz)
+
+                # MATLAB sets Rout = 0; here we simply do not assign dataarray_cumulative
+                self.dataarray_cumulative = None
             case 1:
-                for i in range(self.dataarray.shape[0]):
-                    Rtmp     = self.dataarray[i,:];      # extract one individual
-                    #... continue.. here
+                # copilot did this. TODO: check if it works properly
+                t = self.time
+                R = np.copy(self.dataarray)          # reproduction array (individual rows)
+                all_id = self.treatmentsnames        # treatment IDs for each individual
+
+                for i in range(R.shape[0]):          # run through individuals
+                    Rtmp = R[i, :].copy()
+
+                    # --- 1. Detect time of death ---
+                    ind_dth = np.where(np.isnan(Rtmp))[0]
+                    if ind_dth.size > 0:
+                        ind_dth = ind_dth[0]
+                    else:
+                        ind_dth = len(t) - 1
+
+                    # --- 2. Intermoult periods from non-zero (non-nan) observations ---
+                    ind_moults = np.where((Rtmp != 0) & ~np.isnan(Rtmp))[0]
+                    if ind_moults.size > 1:
+                        interm = np.diff(t[ind_moults])
+                    else:
+                        interm = np.array([])
+
+                    # --- 3. Identify zeros and -1 ("first egg") ---
+                    ind_zero = np.where(Rtmp == 0)[0]
+                    ind_eggs = np.where(Rtmp == -1)[0]
+
+                    if ind_eggs.size == 0:
+                        # assume the first time point is true zero
+                        ind_eggs = np.array([0])
+                    else:
+                        # convert -1 → 0 for cumsum
+                        Rtmp[ind_eggs] = 0
+
+                    # --- 4. Cumulative reproduction ---
+                    cRtmp = np.cumsum(Rtmp)
+
+                    # Remove zero points (set them back to NaN)
+                    cRtmp[ind_zero] = np.nan
+
+                    # Force all values up to first-egg index to 0
+                    cRtmp[: ind_eggs[0] + 1] = 0
+
+                    # Write back
+                    R[i, :] = cRtmp
+
+                    # --- 5. Check the last intermoult ---
+                    ind_last = np.where(~np.isnan(cRtmp))[0]
+                    if ind_last.size > 0:
+                        ind_last = ind_last[-1]
+                    else:
+                        ind_last = 0
+
+                    interm_last = t[ind_dth] - t[ind_last]
+
+                    # Warning condition (same as MATLAB)
+                    if (interm.size > 0) and ((interm > 5).any() or (interm_last > 5)):
+                        print(
+                            f"Warning: Some true zeros may need to be added "
+                            f"for individual {i+1}, treatment {all_id[i]}"
+                        )
+                # Store result
+                self.dataarray_cumulative = R
             case 2:
                 for i in range(self.dataarray.shape[0]): # run through individuals
                     Rtmp     = self.dataarray[i,:];      # extract one individual

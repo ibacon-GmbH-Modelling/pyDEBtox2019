@@ -133,9 +133,9 @@ def DEBtox2019_derivatives_odeint(y, t, C, timextr, DEBpars, moa, feedb):
 
 
 
-def calc_DEBresults(C, timextr, DEBpars, moa, feedb,timeext,solver='RK45'):
-    L0 = DEBpars[5]
-    y0 = np.array([0., L0*1.0, 0., 1.])
+def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
+    # L0 = DEBpars[5]
+    # y0 = np.array([0., L0*1.0, 0., 1.])
     # TODO: test if we need a very extended time vector or it will be enough to use the union of
     #       the time points of the experimental data (for speed reasons, given that rk45 should not care)
     #       in byom it seems to be enough to take the intersection of all the points in the datasets.
@@ -225,7 +225,8 @@ class DEBtox2019models:
                  moa, feedb,
                  Tbp = 0,
                  min_t=500,
-                 solver ='LSODA'):
+                 solver ='LSODA',
+                 breaktime = False):
         '''
         Constructor for the GUTSmodels class. This class contains the
         functions that are used to calculate the likelihood of the GUTS
@@ -260,6 +261,7 @@ class DEBtox2019models:
         self.Tbp = Tbp
         self.min_t = min_t
         self.solver = solver
+        self.breaktime = breaktime
         # deal with the actual data and concentration
         self.timeext = []
 
@@ -293,6 +295,15 @@ class DEBtox2019models:
                 self.active_endpoints[i].append(0)
             # this is because the more stuff are precalculated before likelihood evaluation, the better
             # makes the code faster
+        #TODO: Add print statement to show which parameters are free, which are fixed, and their bounds for verification purposes.
+        print("Initialized DEBtox2019models with the following parameters:")
+        # Add header line for the printout
+        print(f"{'Parameter':<10} {'Value':<8} {'Log-Tr.':<8} {'Free':<6} {'Lower Bound':<10} {'Upper Bound':<10}")
+        for i in range(len(self.parnames)):
+            if self.islog[i]:
+                print(f"{self.parnames[i]:<10} {self.parvals[i]:<8.4f} {self.islog[i]:<8} {self.isfree[i]:<6} ({10**(self.parbound_lower[i]):<10.4f}, {10**(self.parbound_upper[i]):<10.4f})")
+            else:
+                print(f"{self.parnames[i]:<10} {self.parvals[i]:<8.4f} {self.islog[i]:<8} {self.isfree[i]:<6} ({self.parbound_lower[i]:<10.4f}, {self.parbound_upper[i]:<10.4f})")
 
     
     def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
@@ -303,9 +314,11 @@ class DEBtox2019models:
           - timeext is a 1D increasing array of time points.
           - calc_DEBresults returns solution aligned to the provided time grid.
         """
+        L0 = DEBpars[5]
+        y0 = np.array([0., L0*1.0, 0., 1.])
         # If no delay, shortcut
         if not (hasattr(self, "Tbp") and self.Tbp and self.Tbp > 0):
-            return calc_DEBresults(C, timextr, DEBpars, moa, feedb, timeext, solver=self.solver)
+            return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver=self.solver)
 
         Tbp = self.Tbp
         # compute delayed times (tbp) relative to original grid
@@ -313,15 +326,24 @@ class DEBtox2019models:
         tbp = timeext[timeext > Tbp] - Tbp
         if tbp.size == 0:
             # Nothing to delay; just solve on the original grid
-            return calc_DEBresults(C, timextr, DEBpars, moa, feedb, timeext, solver=self.solver)
-
+            return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver=self.solver)
         # Merge original time grid with delayed grid so the solver "sees" the delayed trajectory
         # Keep order and uniqueness
-        newtime = np.unique(np.concatenate((timeext, tbp)))
-
-        # Solve once on the union grid
-        modelsol_union = calc_DEBresults(C, timextr, DEBpars, moa, feedb, newtime, solver=self.solver)
-        # modelsol_union: shape (n_states, len(newtime))
+        newtime = np.unique(np.concatenate((timeext, tbp, timextr))) # adding the original conc times for stability
+        modelsol_union = np.zeros((4, len(newtime)))  # pre-allocate for union grid results
+        if self.breaktime:
+            # print("Newtime vector for breaktime approach: ", newtime)
+            for t in range(len(C)-1):
+                shifted_tvec = newtime[(newtime <= timextr[t+1]) & (newtime >= timextr[t])] - timextr[t]
+                # print("Segment ", t, " with shifted time vector: ", shifted_tvec)
+                modelsl = calc_DEBresults(C[t:t+1], timextr[t:t+1]-timextr[t], y0, DEBpars, moa, feedb, shifted_tvec, solver=self.solver)
+                # print("Model solution for segment ", t, ": ", modelsl)
+                y0 = modelsl[:, -1]  # update initial condition for next segment
+                modelsol_union[:, (newtime >= timextr[t]) & (newtime <= timextr[t+1])] = modelsl
+        else:
+            # Solve once on the union grid
+            modelsol_union = calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, newtime, solver=self.solver)
+            # modelsol_union: shape (n_states, len(newtime))
 
         # We will rebuild the final solution strictly on the original timeext grid
         # Build indexes that map timeext → newtime and tbp → newtime
@@ -332,29 +354,23 @@ class DEBtox2019models:
             # In case of floating-point differences, fall back to robust approach
             # (Still O(n log n), but safe)
             idx_timeext_in_union = np.array([np.where(newtime == t)[0][0] for t in timeext])
-
         idx_tbp_in_union = np.searchsorted(newtime, tbp)
         match_tbp = (newtime[idx_tbp_in_union] == tbp)
         if not np.all(match_tbp):
             idx_tbp_in_union = np.array([np.where(newtime == t)[0][0] for t in tbp])
-
         # Extract the delayed state from union grid at tbp positions
         REPRO_STATE_IDX = 2  # replace with a named constant or parameter if available
         delayed_values = modelsol_union[REPRO_STATE_IDX, idx_tbp_in_union]  # shape (len(tbp),)
-
         # Build the final model solution aligned to original timeext
         modelsol = modelsol_union[:, idx_timeext_in_union]  # shape (n_states, len(timeext))
-
         # Zero out reproduction before applying delayed contribution (as per your logic)
         # If you need additive behavior, change this to additive instead of overwrite.
         modelsol[REPRO_STATE_IDX, :] = 0.0
-
         # Now place delayed values at indices corresponding to (tbp + Tbp) on timeext
         # Because timeext is sorted, we can locate these quickly
         target_times = tbp + Tbp
         idx_targets = np.searchsorted(timeext, target_times)
         match_targets = (timeext[idx_targets] == target_times)
-
         if not np.any(match_targets):
             # No exact matches → likely due to floating-point spacing.
             # If acceptable, we can snap to nearest indices within a small tolerance.
@@ -372,7 +388,6 @@ class DEBtox2019models:
         else:
             # Assign only for exact matches
             modelsol[REPRO_STATE_IDX, idx_targets[match_targets]] = delayed_values[match_targets]
-
         return(modelsol)
 
     def worker_DEBresults(self,pars,parvals,posfree,concarray_i,
@@ -500,9 +515,9 @@ class DEBtox2019models:
             # print("newtimeext: ", newtimeext)
             for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
                 try:
-                    modelsol = self.calc_model(self.concstruct_list[nd].concarray[i], self.concstruct_list[nd].time,
-                           modelpars, self.moa, self.feedb,
-                           newtimeext)
+                    modelsol = self.calc_model(self.concstruct_list[nd].concarraytr[i], self.concstruct_list[nd].timetr,
+                                               modelpars, self.moa, self.feedb,
+                                               newtimeext)
                 except:
                     # there was a problem with the ODE solver
                     return(np.inf)
