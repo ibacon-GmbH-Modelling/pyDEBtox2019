@@ -394,7 +394,8 @@ class DEBtox2019models:
                           time,islog,moa,feedb,tevals):
         par95 = np.copy(parvals)
         par95[posfree] = pars
-        transformed = 10**(par95)*islog + par95*(~islog)
+        transformed = np.where(islog, 10**par95, par95)
+        #transformed = 10**(par95)*islog + par95*(~islog)
         return(self.calc_model(concarray_i,time,transformed,moa,feedb,tevals).T)
 
     # def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
@@ -493,7 +494,8 @@ class DEBtox2019models:
         # TODO: modify in the future remove explicit naming of the endpoints
         #       and make it more general, so that arbitrary endpoints can be handled
         #       without knowing them in advance 
-        modelpars = 10**DEBallpars*self.islog + DEBallpars*(1-self.islog)
+        modelpars = DEBallpars.copy()
+        modelpars[self.islog] = 10**modelpars[self.islog]
         llik = 0
         for nd in range(self.ndatasets):  # iterate over datasets
             fullmodelvector1 = np.array([])

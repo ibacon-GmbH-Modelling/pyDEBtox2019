@@ -26,8 +26,12 @@ def plot_DEBresults(parspaceres, CI=True, multicore=True):
                          np.max(parspaceres.model.concstruct_list[0].time),100)
     fig = plt.figure()
     lenendpoints = np.sum([1 for cl in [ccl,lcl,rcl,scl] if cl is not None])
-    ax = fig.subplots(lenendpoints,len(treatmentnames))
+    # print("number of endpoints to plot: ", lenendpoints)
+    # print("number of treatments to plot: ", len(treatmentnames))
+    ax = fig.subplots(lenendpoints,len(treatmentnames),squeeze=False)
     for i in range(len(treatmentnames)):
+        # print("i: ", i)
+        # print("treatment: ", treatmentnames[i])
         sol.append(parspaceres.model.calc_model(parspaceres.model.concstruct_list[0].concarraytr[i],
                                       parspaceres.model.concstruct_list[0].timetr,
                                       10**(parspaceres.model.parvals)*parspaceres.model.islog + 
@@ -40,8 +44,8 @@ def plot_DEBresults(parspaceres, CI=True, multicore=True):
             # ---- prepare constant arguments
             parvals   = parspaceres.model.parvals
             posfree   = parspaceres.posfree
-            concarray = parspaceres.model.concstruct_list[0].concarray[i]
-            time      = parspaceres.model.concstruct_list[0].time
+            concarray = parspaceres.model.concstruct_list[0].concarraytr[i]
+            time      = parspaceres.model.concstruct_list[0].timetr
             islog     = parspaceres.model.islog
             moa       = parspaceres.model.moa
             feedb     = parspaceres.model.feedb
@@ -100,9 +104,10 @@ def plot_DEBresults(parspaceres, CI=True, multicore=True):
             ax[k,i].set_ylim=[0,1.1]
             if CI:
                 ax[k,i].fill_between(tevals, low[:,3], upp[:,3], color='gray', alpha=0.5)
-            ax[k,i].set_xlabel("Time (d)")
+            #ax[k,i].set_xlabel("Time (d)")
             if i == 0:
                 ax[k,i].set_ylabel("Survival fraction")
+        ax[lenendpoints-1,i].set_xlabel("Time (d)") # add the xlabel only to the last row of plots
     plt.tight_layout()
 
 

@@ -34,7 +34,7 @@ if __name__ == "__main__":
     lcl.plot_data()
 
     Rdata = pd.read_csv("Test_Rdata_opt1.txt", sep="\s+", header=None)
-    rcl = readin.reproclass(Rdata.to_numpy(), reprocase='individual',optcase=2)
+    rcl = readin.reproclass(Rdata.to_numpy(), reprocase='individual',optcase=1)
     rcl.plot_data_cumulative()
 
     Sdata = pd.read_csv("Test_Sdata.txt", sep="\s+", header=None)
@@ -146,13 +146,13 @@ if __name__ == "__main__":
                                        breaktime=1,
                                        solver='LSODA')
     
-    parspace_tox = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)
-    parspace_tox.profile =0  # this has no effect because in the parspace class we read from the setting attribute
+    parspace_tox = ps.PyParspace(ps.SettingParspace(1,0), debmodeltest)
     startt = time.time()
     parspace_tox.run_parspace()
     endt = time.time()
     print("Time for tox model fit: ", endt-startt)
     dt2019.plot_DEBresults(parspace_tox, CI=False, multicore=False)
+    parspace_tox.replot_results()
     # # time with parallel computation
     # # ~200 seconds (physio part)
     # # 1915.45 seconds (tox part)

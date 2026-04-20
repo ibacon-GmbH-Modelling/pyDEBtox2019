@@ -319,6 +319,7 @@ class PyParspace:
         '''
         self.opts = deepcopy(SettingParspace)
         self.model = deepcopy(ModelSetUp)
+        self.profile = self.opts.profile
         self.npars = sum(self.model.isfree)
         self.posfree = np.argwhere(self.model.isfree == 1).flatten()
         self.parlabels = np.copy(self.model.parnames)
