@@ -169,17 +169,25 @@ def scaled_loglikelihood(model,lengths,weights,transf):
     # print("model:", model)
     # print("lengths:", lengths)
     llk=0.0
-    res = lengths**transf - model**transf
-    mn = np.mean(lengths**transf)
-    res_tot = lengths**transf - mn
+    ind_fin = np.isfinite(lengths) & (weights>0)
+    weights = weights[ind_fin]
+    n = np.sum(ind_fin)
+    Nv = np.sum(weights[weights!=0])
+    if transf == 0:
+        #log transformation
+        caplengths = np.maximum(lengths,1e-10)
+        capmodel = np.maximum(model,1e-10)
+        res = np.log(caplengths) - np.log(capmodel)
+        mn = np.mean(np.log(caplengths))
+        res_tot = np.log(caplengths) - mn
+    else:
+        res = lengths**transf - model**transf
+        mn = np.mean(lengths**transf)
+        res_tot = lengths**transf - mn   
     wssq = np.dot(res*weights,res)
     wssq2= np.dot(res * weights**2,res)
-    llk = -0.5*np.sum(weights) * np.log(wssq2) - np.sum(weights) * wssq/(2*wssq2)
-    # fix here..there might be problems with nans
-    # for i in range(len(commontime)):
-    #     modlen = modelvector[commontime[i]]
-    #     obslen = lengtharray[i]
-    #     llk = llk + np.sum(-0.5 * np.log(2 * np.pi ) - 0.5 * ((obslen - modlen)**2) / (1**2))
+    wssq_tot = np.dot(res_tot*weights,res_tot)
+    llk = -0.5*n * np.log(wssq2) - Nv * wssq/(2*wssq2)
     return(llk)
 
 
@@ -218,10 +226,7 @@ class DEBtox2019models:
     '''
     def __init__(self, 
                  completedataset_list, 
-                 parvals,
-                 parnames,
-                 islog, isfree, 
-                 parbound_lower, parbound_upper,
+                 debparameterclass,
                  moa, feedb,
                  Tbp = 0,
                  min_t=500,
@@ -245,17 +250,19 @@ class DEBtox2019models:
             - min_t: 
         '''
         self.ndatasets = len(completedataset_list)  # number of datasets
+        self.par_dataset_map = np.array(debparameterclass.par_dataset_map)
         # attributes that deal with the model parameters
-        self.parnames = np.array(parnames,dtype=object)   # make sure these are numpy arrays
-        self.parvals = np.array(parvals)
-        self.islog = np.array(islog)                   # make sure these are numpy arrays	
-        self.isfree = np.array(isfree)                 # make sure these are numpy arrays
+        self.parnames = np.array(debparameterclass.full_names,dtype=object)   # make sure these are numpy arrays
+        self.parvals = np.array(debparameterclass.full_list)
+        self.islog = np.array(debparameterclass.full_islog)                   # make sure these are numpy arrays	
+        self.isfree = np.array(debparameterclass.full_isfree)                 # make sure these are numpy arrays
         self.posfree = np.argwhere(self.isfree == 1).flatten()  # positions of the free parameters in the parameter vector
-        self.parbound_lower = np.array(parbound_lower) # make sure these are numpy arrays
-        self.parbound_upper = np.array(parbound_upper) # make sure these are numpy arrays
-        islogindex = np.argwhere(self.islog==True).flatten()
-        self.parbound_lower[islogindex] = np.log10(self.parbound_lower[islogindex])
-        self.parbound_upper[islogindex] = np.log10(self.parbound_upper[islogindex])
+        self.parbound_lower = np.array(debparameterclass.full_lowlim) # make sure these are numpy arrays
+        self.parbound_upper = np.array(debparameterclass.full_uplim) # make sure these are numpy arrays
+        # islogindex = np.argwhere(self.islog==True).flatten()
+        # self.parbound_lower[islogindex] = np.log10(self.parbound_lower[islogindex])
+        # self.parbound_upper[islogindex] = np.log10(self.parbound_upper[islogindex])
+        #self.parvals[self.islog] = np.log10(self.parvals[self.islog]) leave it as is..in the input should have the right scaling aleardy
         self.moa = moa
         self.feedb = feedb
         self.Tbp = Tbp
@@ -297,13 +304,34 @@ class DEBtox2019models:
             # makes the code faster
         #TODO: Add print statement to show which parameters are free, which are fixed, and their bounds for verification purposes.
         print("Initialized DEBtox2019models with the following parameters:")
+        print("For easiness of reading, log-transformed parameters are shown in their original scale (10^value) if islog is True.")
         # Add header line for the printout
         print(f"{'Parameter':<10} {'Value':<8} {'Log-Tr.':<8} {'Free':<6} {'Lower Bound':<10} {'Upper Bound':<10}")
         for i in range(len(self.parnames)):
             if self.islog[i]:
-                print(f"{self.parnames[i]:<10} {self.parvals[i]:<8.4f} {self.islog[i]:<8} {self.isfree[i]:<6} ({10**(self.parbound_lower[i]):<10.4f}, {10**(self.parbound_upper[i]):<10.4f})")
+                print(f"{self.parnames[i]:<10} {10**self.parvals[i]:<8.4f} {self.islog[i]:<8} {self.isfree[i]:<6} ({10**(self.parbound_lower[i]):<10.4f}, {10**(self.parbound_upper[i]):<10.4f})")
             else:
                 print(f"{self.parnames[i]:<10} {self.parvals[i]:<8.4f} {self.islog[i]:<8} {self.isfree[i]:<6} ({self.parbound_lower[i]:<10.4f}, {self.parbound_upper[i]:<10.4f})")
+
+    
+    def build_dataset_parameters(self, basepars, nd):
+        """
+        Return a parameter vector for dataset nd.
+        
+        Shared parameters (owner = -1) are kept.
+        Dataset-specific parameters are kept only if owner == nd.
+        All others are replaced by their reference value
+        (initial value, fixed value).
+        """
+        pars = basepars.copy()
+    
+        for i, owner in enumerate(self.par_dataset_map):
+            if owner != -1 and owner != nd:
+                # Parameter belongs to another dataset → deactivate it
+                pars[i] = self.parvals[i]
+    
+        return pars
+
 
     
     def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
@@ -336,7 +364,8 @@ class DEBtox2019models:
             for t in range(len(C)-1):
                 shifted_tvec = newtime[(newtime <= timextr[t+1]) & (newtime >= timextr[t])] - timextr[t]
                 # print("Segment ", t, " with shifted time vector: ", shifted_tvec)
-                modelsl = calc_DEBresults(C[t:t+1], timextr[t:t+1]-timextr[t], y0, DEBpars, moa, feedb, shifted_tvec, solver=self.solver)
+                # print("Concentration segment: ", C[t:t+1])
+                modelsl = calc_DEBresults(C[t:t+2], timextr[t:t+2]-timextr[t], y0, DEBpars, moa, feedb, shifted_tvec, solver=self.solver)
                 # print("Model solution for segment ", t, ": ", modelsl)
                 y0 = modelsl[:, -1]  # update initial condition for next segment
                 modelsol_union[:, (newtime >= timextr[t]) & (newtime <= timextr[t+1])] = modelsl
@@ -494,10 +523,13 @@ class DEBtox2019models:
         # TODO: modify in the future remove explicit naming of the endpoints
         #       and make it more general, so that arbitrary endpoints can be handled
         #       without knowing them in advance 
-        modelpars = DEBallpars.copy()
-        modelpars[self.islog] = 10**modelpars[self.islog]
+        
+        basepars = DEBallpars.copy()
+        basepars[self.islog] = 10 ** basepars[self.islog]
+
         llik = 0
         for nd in range(self.ndatasets):  # iterate over datasets
+            modelpars = self.build_dataset_parameters(basepars, nd)
             fullmodelvector1 = np.array([])
             fullmodelvector2 = np.array([])
             fulllengthvector = np.array([])
@@ -508,11 +540,6 @@ class DEBtox2019models:
             # FIX this part for the brood pouch delay.
             # CHECK if anything can be pre-computed
             # tbp = 0 # make sure it is declared here
-            # if self.Tbp > 0:
-            #     tbp = self.timeext[nd][self.timeext[nd]>self.Tbp] - self.Tbp
-            #     # print("tbp1: ", tbp)
-            #     newtime = np.unique(np.concatenate((self.timeext[nd], tbp)))
-            #     # print("newtime ",newtime)
             newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime)))
             # print("newtimeext: ", newtimeext)
             for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
@@ -524,12 +551,6 @@ class DEBtox2019models:
                     # there was a problem with the ODE solver
                     return(np.inf)
                 
-                # if self.Tbp > 0:
-                #     mask = np.isin(newtimeext, tbp)
-                #     indices = np.nonzero(mask)[0]
-                #     Xbp = np.copy(modelsol[2,indices])
-                # # print("indices: ",indices)
-                # # print("Xbp before delay: ", Xbp)
                 idx_targets = np.searchsorted(newtimeext, self.timeext[nd])
                 # match_targets = (self.timeext[nd][idx_targets] == target_times)
                 
@@ -539,18 +560,6 @@ class DEBtox2019models:
                 modelsol = modelsol[:,idx_targets]
                 # print("modelsol before substitution: ")
                 # print(modelsol[2,:])
-
-                # if self.Tbp > 0:
-                #     modelsol[2,:] = 0
-                #     # print("self.timeext[nd]", self.timeext[nd])
-                #     # print("tbp+self.Tbp:", tbp+self.Tbp)
-                #     mask = np.isin(self.timeext[nd],tbp+self.Tbp)
-                #     indicesbp = np.nonzero(mask)[0]
-                #     # print(indicesbp)
-                #     # print(Xbp)
-                #     modelsol[2,indicesbp] = Xbp
-                #     print("modelsol after substitution: ")
-                #     print(modelsol[2,:])
 
                 for endpoint in self.active_endpoints[nd]:
                     if endpoint == 0:
