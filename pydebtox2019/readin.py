@@ -211,7 +211,7 @@ class dataclass:
         # use here the same solution that Tjalling has in BYOM
         self.trrateatsnames = self.treatmentsnames + (dataset_id)*100
 
-    def plot_data(self, dataarray=None, label="Data"):
+    def plot_data(self, dataarray=None, label="Data", wmeans=False):
         if dataarray is None:
             dataarray = self.dataarray
         fig = plt.figure()
@@ -220,6 +220,11 @@ class dataclass:
         minval = min(0,np.nanmin(dataarray))
         if self.ntreats==1:
             ax.plot(self.time,dataarray[0], 'o', label='Data', color='blue')
+            if wmeans:
+                ax.errorbar(self.time,self.meanvalstransf, 
+                            yerr=[self.meanvalstransf - self.lowlimtreat,
+                                  self.upplimtreat - self.meanvalstransf],
+                            fmt='s', label='Weighted mean', color='red')
             ax.set_ylabel("Data")
             ax.set_xlabel("Time [d]")
         else:
@@ -227,6 +232,11 @@ class dataclass:
                 for j in range(len(dataarray)):
                     if self.treatmentsnames[j] == self.uniquetreats[i]:
                         ax[i].plot(self.time, dataarray[j], 'o', color='blue')
+                if wmeans:
+                    ax[i].errorbar(self.time,self.meanvalstransf[i,:], 
+                                   yerr=[self.meanvalstransf[i,:] - self.lowlimtreat[i,:],
+                                         self.upplimtreat[i,:] - self.meanvalstransf[i,:]],
+                                   fmt='s', label='Weighted mean', color='red')
                 ax[i].set_xlabel("Time [d]")
                 ax[i].set_title("T %s"%self.uniquetreats[i])
                 ax[i].set_ylim([minval, maxval*1.1])
@@ -245,6 +255,102 @@ class dataclass:
             ax.plot(self.time, dataarray[i], 'o', color='blue')
         # ax.set_ylim([minval, maxval*1.1])
         return ax
+    
+    def calc_mean_and_ci(self,dataarray=None):
+        '''
+        Calculate the weighted mean and the confidence interval
+        for each tratment and each time point according
+        to the transformation indicated in the data file
+
+        The operation is done per treatment, but the 
+        function will return the overall thing.
+        '''
+        self.meanvals = np.zeros((len(self.uniquetreats),len(self.time)))
+        self.meanvalstransf = np.zeros((len(self.uniquetreats),len(self.time)))
+        self.lowlimtreat = np.zeros((len(self.uniquetreats),len(self.time)))
+        self.upplimtreat = np.zeros((len(self.uniquetreats),len(self.time)))
+        for i in range(len(self.uniquetreats)):    
+            if dataarray is None:
+                datain = self.dataarray[self.treatmentsnames == self.uniquetreats[i]]
+            else:
+                # this is needed because the reproduction data can be given in different
+                # formats, and the function should be able to handle all of them
+                datain = dataarray[self.treatmentsnames == self.uniquetreats[i]]
+            weightsin = self.weights[self.treatmentsnames == self.uniquetreats[i]]
+            # make first sure that all the weights are Nan where the data is NaN
+            mask = np.isnan(datain)
+            weightsin[mask] = np.nan
+
+            # 2. Row-wise sum ignoring NaNs
+            row_sums = np.nansum(weightsin, axis=0)
+
+            # 3. Indices where sum == 0
+            ind_zero = np.where(row_sums == 0)[0]
+
+            # 4. Indices where sum != 0
+            ind_nonzero = np.where(row_sums != 0)[0]
+            if self.statstype == 0:
+                # logtransform
+                data_in = np.log(datain,1e-10) # use with caution
+            else:
+                data_in = datain ** self.statstype
+
+            # This is the SE of the weighted mean, calculated according to Madansky
+            # and Alexander, following the WinCross/Quantum approach.
+            # See: http://www.analyticalgroup.com/download/WEIGHTED_MEAN.pdf. This
+            # also works when there are no weights, but then all w_in should be 1!
+            # --- Initialize mean vector ---
+            data_mn = np.full((data_in.shape[1],), np.nan)
+            data_mnnt = np.full((datain.shape[1],), np.nan)
+            # --- Means ---
+            # For outliers (no weights → simple mean)
+            data_mn[ind_zero] = np.nanmean(data_in[:, ind_zero], axis=0)
+            data_mnnt[ind_zero] = np.nanmean(datain[:, ind_zero], axis=0)
+
+            # For regular points → weighted mean
+            num = np.nansum(data_in[:,ind_nonzero] * weightsin[:,ind_nonzero], axis=0)
+            den = np.nansum(weightsin[:,ind_nonzero], axis=0)
+            data_mn[ind_nonzero] = num / den
+            data_mnnt[ind_nonzero] = np.nansum(datain[:,ind_nonzero] * weightsin[:,ind_nonzero], axis=0) / np.nansum(weightsin[:,ind_nonzero], axis=0)
+
+            # --- Clean data based on weights ---
+            data_in[weightsin == 0] = np.nan
+            data_in[np.isnan(weightsin)] = np.nan
+
+            # --- Standard deviation and variance ---
+            data_sd = np.nanstd(data_in, axis=0, ddof=0)   # MATLAB std(...,0,...)
+            data_var = data_sd ** 2
+
+            # --- Effective sample size ("b") ---
+            sum_w = np.nansum(weightsin, axis=0)
+            sum_w_sq = np.nansum(weightsin**2, axis=0)
+            b = (sum_w ** 2) / sum_w_sq
+
+            # --- Variance of weighted mean ---
+            var_mean = data_var / b
+
+            # --- Standard error ---
+            data_se = np.sqrt(var_mean)
+
+            # --- Confidence interval (± 2 SE) ---
+            data_ci = np.column_stack((data_mn - 2 * data_se,
+                                       data_mn + 2 * data_se))
+
+            # --- Back-transform ---
+            if self.statstype == 0:
+                # log-transform case
+                data_mn = np.exp(data_mn)
+                data_ci = np.exp(data_ci)
+            else:
+                # power transform
+                data_mn = data_mn ** (1 / self.statstype)
+                data_ci = data_ci ** (1 / self.statstype)
+
+            self.meanvals[i,:] = data_mnnt # TODO: fix this here!!!
+            self.meanvalstransf[i,:] = data_mn
+            self.lowlimtreat[i,:] = data_ci[:, 0]
+            self.upplimtreat[i,:] = data_ci[:, 1]
+
 
 
 class survdataclass(dataclass):
@@ -260,6 +366,7 @@ class survdataclass(dataclass):
         self.survprobstreat = []
         self.lowlimtreat = []
         self.upplimtreat = []
+        self.meanvalstransf = []
         z= 1.96
         for i in range(self.ntreats):
             tmpsurv = self.dataarray[i, np.isnan(self.dataarray[i])==False]
@@ -280,15 +387,16 @@ class survdataclass(dataclass):
             tmpupplim = np.minimum(1,a+b)
             self.lowlimtreat.append(tmplowlim)
             self.upplimtreat.append(tmpupplim)
+            self.meanvalstransf.append(tmpprob) #?? check
 
-    def plot_data(self, dataarray=None, label="numbers alive", scaleto1=False):
+    def plot_data(self, dataarray=None, label="numbers alive", scaleto1=False, wmeans=False):
         if dataarray is None:
             dataarray = self.dataarray
         if scaleto1:
             for i in range(dataarray.shape[0]):
                 ninit =dataarray[i,0]
                 dataarray[i,:] = dataarray[i,:]/ninit
-        return super().plot_data(dataarray=dataarray, label=label)
+        return super().plot_data(dataarray=dataarray, label=label, wmeans=wmeans)
     
     def add_plotdata(self, ax, ntreat, label="Data", scaleto1=False):
         '''
@@ -321,8 +429,8 @@ class lengthdataclass(dataclass):
             tmplength = self.dataarray[i, np.isnan(self.dataarray[i])==False]
             self.lengthtreat.append(tmplength)
 
-    def plot_data(self, dataarray=None, label="Length [cm]"):
-        return super().plot_data(dataarray=dataarray, label=label)
+    def plot_data(self, dataarray=None, label="Length [cm]", wmeans=False):
+        return super().plot_data(dataarray=dataarray, label=label, wmeans=wmeans)
     
         
 
@@ -551,11 +659,11 @@ class reproclass(dataclass):
     def makerepro_sex(self):
         pass
 
-    def plot_data(self, dataarray=None, label="Individual reproduction"):
-        return super().plot_data(dataarray=dataarray, label=label)
+    def plot_data(self, dataarray=None, label="Individual reproduction", wmeans=False):
+        return super().plot_data(dataarray=dataarray, label=label,wmeans=wmeans)
     
-    def plot_data_cumulative(self, label="Cumulative reproduction"):
-        return super().plot_data(dataarray=self.dataarray_cumulative, label=label)
+    def plot_data_cumulative(self, label="Cumulative reproduction", wmeans=False):
+        return super().plot_data(dataarray=self.dataarray_cumulative, label=label, wmeans=wmeans)
     
     def add_plotdata(self, ax, ntreat, label="Data"):
         '''

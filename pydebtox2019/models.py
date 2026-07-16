@@ -249,8 +249,10 @@ class DEBtox2019models:
             - parbound_upper: list of upper bounds for the parameters
             - min_t: 
         '''
+        self.debparameterclass = debparameterclass
         self.ndatasets = len(completedataset_list)  # number of datasets
-        self.par_dataset_map = np.array(debparameterclass.par_dataset_map)
+        self.par_dataset_map = debparameterclass.par_dataset_map
+        self.full_base_names = debparameterclass.full_base_names
         # attributes that deal with the model parameters
         self.parnames = np.array(debparameterclass.full_names,dtype=object)   # make sure these are numpy arrays
         self.parvals = np.array(debparameterclass.full_list)
@@ -314,24 +316,60 @@ class DEBtox2019models:
                 print(f"{self.parnames[i]:<10} {self.parvals[i]:<8.4f} {self.islog[i]:<8} {self.isfree[i]:<6} ({self.parbound_lower[i]:<10.4f}, {self.parbound_upper[i]:<10.4f})")
 
     
-    def build_dataset_parameters(self, basepars, nd):
+    def build_dataset_parameters(self, expanded_parvals, nd):
         """
-        Return a parameter vector for dataset nd.
+        Collapse expanded parameter vector into a dataset-specific
+        DEB parameter vector compatible with the ODE solver.
+        """
+    
+        # Canonical DEB parameter order (normalized)
+        deb_order = [
+            "fbv", "krv", "kap", "yp", "lm_ref",
+            "l0", "lp", "lm", "rb", "rm",
+            "f", "hb", "a", "lf", "lj", "tlag",
+            "kd", "bb", "zb", "bs", "zs"
+        ]
+    
+        compact = np.zeros(len(deb_order))
+    
+        for i, pname in enumerate(deb_order):
         
-        Shared parameters (owner = -1) are kept.
-        Dataset-specific parameters are kept only if owner == nd.
-        All others are replaced by their reference value
-        (initial value, fixed value).
-        """
-        pars = basepars.copy()
+            # All expanded indices for this base parameter
+            indices = np.where(self.full_base_names == pname)[0]
     
-        for i, owner in enumerate(self.par_dataset_map):
-            if owner != -1 and owner != nd:
-                # Parameter belongs to another dataset → deactivate it
-                pars[i] = self.parvals[i]
+            if len(indices) == 0:
+                raise RuntimeError(f"Parameter '{pname}' missing.")
     
-        return pars
-
+            # 1️ Find grouped / dataset-specific match
+            selected = []
+            for idx in indices:
+                owner = self.par_dataset_map[idx]
+                if owner == -1:
+                    continue
+                if nd in owner:
+                    selected.append(idx)
+    
+            if len(selected) == 1:
+                compact[i] = expanded_parvals[selected[0]]
+                continue
+            
+            if len(selected) > 1:
+                raise RuntimeError(
+                    f"Ambiguous grouped definition for '{pname}' in dataset {nd}"
+                )
+    
+            # 2️ Fallback to shared parameter
+            shared = [idx for idx in indices if self.par_dataset_map[idx] == -1]
+    
+            if len(shared) == 1:
+                compact[i] = expanded_parvals[shared[0]]
+                continue
+            
+            raise RuntimeError(
+                f"Cannot resolve parameter '{pname}' for dataset {nd}"
+            )
+    
+        return compact
 
     
     def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
@@ -419,13 +457,133 @@ class DEBtox2019models:
             modelsol[REPRO_STATE_IDX, idx_targets[match_targets]] = delayed_values[match_targets]
         return(modelsol)
 
-    def worker_DEBresults(self,pars,parvals,posfree,concarray_i,
-                          time,islog,moa,feedb,tevals):
-        par95 = np.copy(parvals)
-        par95[posfree] = pars
-        transformed = np.where(islog, 10**par95, par95)
-        #transformed = 10**(par95)*islog + par95*(~islog)
-        return(self.calc_model(concarray_i,time,transformed,moa,feedb,tevals).T)
+    # def worker_DEBresults(self,pars,parvals,posfree,concarray_i,
+    #                       time,islog,moa,feedb,tevals):
+    #     par95 = np.copy(parvals)
+    #     par95[posfree] = pars
+    #     transformed = np.where(islog, 10**par95, par95)
+    #     #transformed = 10**(par95)*islog + par95*(~islog)
+    #     return(self.calc_model(concarray_i,time,transformed,moa,feedb,tevals).T)
+
+    def _calc_modelvalues(self):
+        # calculate the model points at exactly the time
+        # points of the experimental data
+        basepars = self.parvals.copy()
+        basepars[self.islog] = 10 ** basepars[self.islog]
+        modelsolcontainer = [None]*self.ndatasets
+        for nd in range(self.ndatasets):  # iterate over datasets
+            modelpars = self.build_dataset_parameters(basepars, nd)
+            fullmodelvector1 = np.array([])
+            fullmodelvector2 = np.array([])
+            fulllengthvector = np.array([])
+            fullreprovector = np.array([])
+            fullweightslengthvector = np.array([])
+            fullweightsreprovector = np.array([])
+            newtime = self.timeext[nd]
+            modelsoltreatlevel = np.full((4,len(newtime)),np.nan) 
+            # FIX this part for the brood pouch delay.
+            # CHECK if anything can be pre-computed
+            # tbp = 0 # make sure it is declared here
+            newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime)))
+            # print("newtimeext: ", newtimeext)
+            for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
+                try:
+                    modelsol = self.calc_model(self.concstruct_list[nd].concarraytr[i], self.concstruct_list[nd].timetr,
+                                               modelpars, self.moa, self.feedb,
+                                               newtimeext)
+                except:
+                    # there was a problem with the ODE solver
+                    return(np.inf)
+                
+                idx_targets = np.searchsorted(newtimeext, self.timeext[nd])
+                # match_targets = (self.timeext[nd][idx_targets] == target_times)
+                
+                # mask = np.isin(newtimeext,self.timeext[nd])
+                # indices = np.nonzero(mask)[0]
+                # # print("indices", indices)
+                #modelsol = modelsol[:,idx_targets]
+                # modelsoltreatlevel = modelsol[:,idx_targets]
+                # modelsolcontainer[nd] = modelsoltreatlevel
+                # print("modelsol before substitution: ")
+                # print(modelsol[2,:])
+
+                for endpoint in self.active_endpoints[nd]:
+                    if endpoint == 0:
+                        # llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
+                        #                                 self.survstruct_list[nd].deatharraytreat[i])
+                        # # print("llsurv treatment ", i)
+                        # # print(llsurv)
+                        # llik += llsurv
+                        modelsoltreatlevel[:, self.indexcommon_surv[nd][i]] = modelsol[:, self.indexcommon_surv[nd][i]] 
+                    elif (endpoint == 1):  # length
+                        lengthtreat = self.lengthstruct_list[nd].flatdataclean[i]
+                        weights = self.lengthstruct_list[nd].flatweightsclean[i]
+                        commontime =  np.array([self.indexcommon_length[nd][j] for j in range(len(self.indexcommon_length[nd])) if self.lengthstruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
+                        modelvector = np.tile(modelsol[1, :][commontime[0]],len(commontime))[self.lengthstruct_list[nd].indfintable[i]]
+
+                        fullmodelvector1 = np.concatenate((fullmodelvector1, modelvector))
+                        fulllengthvector = np.concatenate((fulllengthvector, lengthtreat))
+                        fullweightslengthvector = np.concatenate((fullweightslengthvector, weights))
+                    elif (endpoint == 2):  # reproduction
+                        reprotreat = self.reprostruct_list[nd].flatdataclean[i]
+                        weights = self.reprostruct_list[nd].flatweightsclean[i]
+                        commontime =  np.array([self.indexcommon_repro[nd][j] for j in range(len(self.indexcommon_repro[nd])) if self.reprostruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
+                        modelvector = np.tile(modelsol[2, :][commontime[0]],len(commontime))[self.reprostruct_list[nd].indfintable[i]]
+                        fullmodelvector2 = np.concatenate((fullmodelvector2, modelvector))
+                        fullreprovector = np.concatenate((fullreprovector, reprotreat))
+                        fullweightsreprovector = np.concatenate((fullweightsreprovector, weights))
+            if self.lengthstruct_list[nd] is not None:
+                transf = self.lengthstruct_list[nd].statstype
+                lllength = scaled_loglikelihood(fullmodelvector1, fulllengthvector, fullweightslengthvector, transf)
+                # print("lllength treatment ", i)
+                # print(lllength)
+                llik += lllength
+            if self.reprostruct_list[nd] is not None:
+                transf = self.reprostruct_list[nd].statstype
+                llrepro = scaled_loglikelihood(fullmodelvector2, fullreprovector, fullweightsreprovector, transf)
+                # print("llrepro treatment ", i)
+                # print(llrepro)
+                llik += llrepro
+        # print("Total llk: ", -llik)
+        return(modelsolcontainer)
+
+    
+    def worker_DEBresults(
+        self,
+        pars,
+        parvals,
+        posfree,
+        concarray,
+        time,
+        islog,
+        moa,
+        feedb,
+        tevals,
+        nd):
+        """
+        Worker function for CI propagation.
+        """
+
+        # 1. Rebuild expanded parameter vector
+        expanded = np.array(parvals, copy=True)
+        expanded[posfree] = pars
+
+        # 2. Apply log-transform in expanded space
+        expanded = np.where(islog, 10 ** expanded, expanded)
+
+        # 3. Collapse to dataset-specific solver parameters
+        solver_pars = self.build_dataset_parameters(expanded, nd)
+
+        # 4. Run model
+        return self.calc_model(
+            concarray,
+            time,
+            solver_pars,
+            moa,
+            feedb,
+            tevals
+        ).T
+
 
     # def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
     #     # somewhere here need to implement also the Tbp part
@@ -452,61 +610,61 @@ class DEBtox2019models:
     #         modelsol = calc_DEBresults(C, timextr, DEBpars, moa, feedb, timeext, solver=self.solver)
     #     return(modelsol)
 
-    def log_likelihood_wrong(self, theta, DEBallpars, posfree):
-        # fallback function that separates the likelihood calculation for each
-        # treatment and summs the contriubtions
-        # The reason this is wrong is that the treatments might not be
-        # independent and therefore the loglikelihood cannot be summed
-        '''
-        Calculate the log-likelihood of the GUTS model.
+    # def log_likelihood_wrong(self, theta, DEBallpars, posfree):
+    #     # fallback function that separates the likelihood calculation for each
+    #     # treatment and summs the contriubtions
+    #     # The reason this is wrong is that the treatments might not be
+    #     # independent and therefore the loglikelihood cannot be summed
+    #     '''
+    #     Calculate the log-likelihood of the GUTS model.
 
-        Arguments:
-        - theta: vector of free parameter values
-        - DEBallpars: vector of all parameter values
-        - posfree: indices of the free parameters in the parameter vector
-        '''
-        DEBallpars[posfree] = theta
-        # TODO: make sure that for each dataset the respective hb value is correctly passed
-        modelpars = 10**DEBallpars*self.islog + DEBallpars*(1-self.islog)
-        llik = 0
-        for nd in range(self.ndatasets):  # iterate over datasets
-            for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
-                try:
-                    modelsol = self.calc_model(self.concstruct_list[nd].concarray[i], self.concstruct_list[nd].time,
-                           modelpars, self.moa, self.feedb,
-                           self.timeext[nd])
-                except:
-                    # there was a problem with the ODE solver
-                    return(np.inf)
-                for endpoint in self.active_endpoints[nd]:
-                    if endpoint == 0:
-                        llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
-                                                        self.survstruct_list[nd].deatharraytreat[i])
-                        print("llsurv treatment ", i)
-                        print(llsurv)
-                        llik += llsurv
-                    elif (endpoint == 1):  # length
-                        lengthtreat = self.lengthstruct_list[nd].flatdataclean[i]
-                        weights = self.lengthstruct_list[nd].flatweightsclean[i]
-                        commontime =  np.array([self.indexcommon_length[nd][j] for j in range(len(self.indexcommon_length[nd])) if self.lengthstruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-                        modelvector = np.tile(modelsol[1, :][commontime[0]],len(commontime))[self.lengthstruct_list[nd].indfintable[i]]
-                        transf = self.lengthstruct_list[nd].statstype
-                        lllength = scaled_loglikelihood(modelvector, lengthtreat, weights, transf)
-                        print("lllength treatment ", i)
-                        print(lllength)
-                        llik += lllength
-                    elif (endpoint == 2):  # reproduction
-                        reprotreat = self.reprostruct_list[nd].flatdataclean[i]
-                        weights = self.reprostruct_list[nd].flatweightsclean[i]
-                        commontime =  np.array([self.indexcommon_repro[nd][j] for j in range(len(self.indexcommon_repro[nd])) if self.reprostruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-                        modelvector = np.tile(modelsol[2, :][commontime[0]],len(commontime))[self.reprostruct_list[nd].indfintable[i]]
-                        transf = self.reprostruct_list[nd].statstype
-                        llrepro = scaled_loglikelihood(modelvector, reprotreat, weights, transf)
-                        print("llrepro treatment ", i)
-                        print(llrepro)
-                        llik += llrepro
-        print("Total llk: ", -llik)
-        return(-llik)
+    #     Arguments:
+    #     - theta: vector of free parameter values
+    #     - DEBallpars: vector of all parameter values
+    #     - posfree: indices of the free parameters in the parameter vector
+    #     '''
+    #     DEBallpars[posfree] = theta
+    #     # TODO: make sure that for each dataset the respective hb value is correctly passed
+    #     modelpars = 10**DEBallpars*self.islog + DEBallpars*(1-self.islog)
+    #     llik = 0
+    #     for nd in range(self.ndatasets):  # iterate over datasets
+    #         for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
+    #             try:
+    #                 modelsol = self.calc_model(self.concstruct_list[nd].concarray[i], self.concstruct_list[nd].time,
+    #                        modelpars, self.moa, self.feedb,
+    #                        self.timeext[nd])
+    #             except:
+    #                 # there was a problem with the ODE solver
+    #                 return(np.inf)
+    #             for endpoint in self.active_endpoints[nd]:
+    #                 if endpoint == 0:
+    #                     llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
+    #                                                     self.survstruct_list[nd].deatharraytreat[i])
+    #                     print("llsurv treatment ", i)
+    #                     print(llsurv)
+    #                     llik += llsurv
+    #                 elif (endpoint == 1):  # length
+    #                     lengthtreat = self.lengthstruct_list[nd].flatdataclean[i]
+    #                     weights = self.lengthstruct_list[nd].flatweightsclean[i]
+    #                     commontime =  np.array([self.indexcommon_length[nd][j] for j in range(len(self.indexcommon_length[nd])) if self.lengthstruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
+    #                     modelvector = np.tile(modelsol[1, :][commontime[0]],len(commontime))[self.lengthstruct_list[nd].indfintable[i]]
+    #                     transf = self.lengthstruct_list[nd].statstype
+    #                     lllength = scaled_loglikelihood(modelvector, lengthtreat, weights, transf)
+    #                     print("lllength treatment ", i)
+    #                     print(lllength)
+    #                     llik += lllength
+    #                 elif (endpoint == 2):  # reproduction
+    #                     reprotreat = self.reprostruct_list[nd].flatdataclean[i]
+    #                     weights = self.reprostruct_list[nd].flatweightsclean[i]
+    #                     commontime =  np.array([self.indexcommon_repro[nd][j] for j in range(len(self.indexcommon_repro[nd])) if self.reprostruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
+    #                     modelvector = np.tile(modelsol[2, :][commontime[0]],len(commontime))[self.reprostruct_list[nd].indfintable[i]]
+    #                     transf = self.reprostruct_list[nd].statstype
+    #                     llrepro = scaled_loglikelihood(modelvector, reprotreat, weights, transf)
+    #                     print("llrepro treatment ", i)
+    #                     print(llrepro)
+    #                     llik += llrepro
+    #     print("Total llk: ", -llik)
+    #     return(-llik)
     
     # new version with all the treatments together
     def log_likelihood(self, theta, DEBallpars, posfree):
