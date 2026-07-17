@@ -162,126 +162,106 @@ def efsa_criteria(model):
             modelsol = modelsol[:,idx_targets]
             modelcoltreatcont[i] = modelsol
         modelsolcontainer[nd] = modelcoltreatcont
-    # now all the model solutions have been calculated and stored in modelsolcontainer, 
-    # we can calculate the metrics for each endpoint and treatment.
-    # now need to get the data element and do the calculatations of the criteria
-    #return(modelsolcontainer)
-    for endpoint in model.active_endpoints[nd]:
-        ntreats = model.concstruct_list[nd].ntreats
-        if endpoint == 0:
-            # survival
-            survmodelvals = np.array([modelsolcontainer[nd][x][3] for x in range(ntreats)]) ## to check properly if the timing is right
-            survdatavals = model.survstruct_list[nd].survprobstreat
-            # DEBUG:
-            # print("model")
-            # print(survmodelvals)
-            # print("data")
-            # print(survdatavals)
-        elif endpoint == 1:
-            # length
-            mask = np.isin(model.timeext[nd], model.lengthstruct_list[nd].time)
-            lengthmodelvals = np.array([modelsolcontainer[nd][x][1][mask] for x in range(ntreats)])
-            lengthdatavals = model.lengthstruct_list[nd].meanvalstransf
-            nobs = np.sum(~np.isnan(lengthdatavals))
-            # DEBUG:
-            # print("model")
-            # print(lengthmodelvals)
-            # print("data")
-            # print(lengthdatavals)
-            res = lengthdatavals - lengthmodelvals
-            restot = lengthdatavals - np.nanmean(lengthdatavals,axis=1, keepdims=True)
-            # print(np.nanmean(lengthdatavals,axis=1))
-            # print(restot)
-            r2 = 1 - np.nansum(res**2)/np.nansum(restot**2)
-            nrmse = (np.sqrt((np.nansum(res**2))/nobs))/np.nanmean(lengthdatavals)
-            print("R2 length: ", r2)
-            print("NRMSE length: ", nrmse)
+        # now all the model solutions have been calculated and stored in modelsolcontainer, 
+        # we can calculate the metrics for each endpoint and treatment.
+        # now need to get the data element and do the calculatations of the criteria
+
+        # this is the reporting of EFSA metrics for each dataset
+        print("Calculating EFSA criteria for dataset %d"%(nd))
+        for endpoint in model.active_endpoints[nd]:
+            ntreats = model.concstruct_list[nd].ntreats
+            if endpoint == 0:
+                # survival
+                survmodelvals = np.array([modelsolcontainer[nd][x][3] for x in range(ntreats)]) ## to check properly if the timing is right
+                survdatavals = model.survstruct_list[nd].survprobstreat
+                # DEBUG:
+                # print("model")
+                # print(survmodelvals)
+                # print("data")
+                # print(survdatavals)
+            elif endpoint == 1:
+                # length
+                mask = np.isin(model.timeext[nd], model.lengthstruct_list[nd].time)
+                lengthmodelvals = np.array([modelsolcontainer[nd][x][1][mask] for x in range(ntreats)])
+                lengthdatavals = model.lengthstruct_list[nd].meanvalstransf
+                valid = ~np.isnan(lengthdatavals)
+                nobs = np.sum(valid)  
+                res = lengthdatavals[valid] - lengthmodelvals[valid]
+                restot = lengthdatavals[valid] - np.mean(lengthdatavals[valid])
+                r2 = 1 - np.nansum(res**2)/np.nansum(restot**2)
+                nrmse = (np.sqrt((np.sum(res**2))/nobs))/np.mean(lengthdatavals[valid])
+                print("R2 length: ", r2)
+                print("NRMSE length: ", nrmse)
+            elif endpoint == 2:
+                # reproduction
+                mask = np.isin(model.timeext[nd], model.reprostruct_list[nd].time)
+                repromodelvals = np.array([modelsolcontainer[nd][x][2][mask] for x in range(ntreats)])
+                reprodatavals = model.reprostruct_list[nd].meanvalstransf
+                valid = ~np.isnan(reprodatavals)
+                nobs = np.sum(valid)
+                res = reprodatavals[valid] - repromodelvals[valid]
+                restot = reprodatavals[valid] - np.mean(reprodatavals[valid])
+                r2 = 1 - np.sum(res**2)/np.sum(restot**2)
+                nrmse = np.sqrt(np.sum(res**2/nobs))/np.nanmean(reprodatavals[valid])
+                print("R2 repro: ", r2)
+                print("NRMSE repro: ", nrmse)
+    # calculate now the EFSA criteria for the the common endpoints
+    # for all present datasets
+    common_endpoints = set(model.active_endpoints[0])
+    for nd in range(1, model.ndatasets):
+        common_endpoints &= set(model.active_endpoints[nd])
+    print("\n=== Combined metrics across all datasets ===")
+    for endpoint in sorted(common_endpoints):
+        all_data = []
+        all_model = []
+        for nd in range(model.ndatasets):
+            ntreats = model.concstruct_list[nd].ntreats
+            if endpoint == 1:
+                # length
+                mask = np.isin(
+                    model.timeext[nd],
+                    model.lengthstruct_list[nd].time
+                )
+                modelvals = np.array([
+                    modelsolcontainer[nd][x][1][mask]
+                    for x in range(ntreats)
+                ])
+                datavals = model.lengthstruct_list[nd].meanvalstransf
+            elif endpoint == 2:
+                # reproduction
+                mask = np.isin(
+                    model.timeext[nd],
+                    model.reprostruct_list[nd].time
+                )
+                modelvals = np.array([
+                    modelsolcontainer[nd][x][2][mask]
+                    for x in range(ntreats)
+                ])
+                datavals = model.reprostruct_list[nd].meanvalstransf
+            else:
+                # skip endpoints for which metrics are not implemented
+                continue
+            # keep only valid observations
+            valid = ~np.isnan(datavals)
+            all_data.append(datavals[valid])
+            all_model.append(modelvals[valid])
+        if len(all_data) == 0:
+            continue
+
+        all_data = np.concatenate(all_data)
+        all_model = np.concatenate(all_model)
+        nobs = len(all_data)
+        res = all_data - all_model
+        restot = all_data - np.mean(all_data)
+        r2 = 1 - np.sum(res**2) / np.sum(restot**2)
+        nrmse = np.sqrt(np.sum(res**2) / nobs) / np.mean(all_data)
+        if endpoint == 1:
+            print(f"Global R2 length: {r2}")
+            print(f"Global NRMSE length: {nrmse}")
         elif endpoint == 2:
-            # reproduction
-            mask = np.isin(model.timeext[nd], model.reprostruct_list[nd].time)
-            repromodelvals = np.array([modelsolcontainer[nd][x][2][mask] for x in range(ntreats)])
-            reprodatavals = model.reprostruct_list[nd].meanvalstransf
-            # ###DEBUG:
-            # print("model")
-            # print(repromodelvals)
-            # print("data")
-            # print(reprodatavals)
-            # print("mean observations")
-            # print(np.nanmean(reprodatavals))
-            # print("number of observations")
-            # print(np.sum(~np.isnan(reprodatavals)))
-            nobs = np.sum(~np.isnan(reprodatavals))
-            res = reprodatavals - repromodelvals
-            restot = reprodatavals - np.nanmean(reprodatavals,axis=1, keepdims=True)
-            r2 = 1 - np.nansum(res**2)/np.nansum(restot**2)
-            # this needs to be fixed because the sizes are not correct
-            nrmse = np.sqrt(np.nansum(res**2/nobs))/np.nanmean(reprodatavals)
-            print("R2 repro: ", r2)
-            print("NRMSE repro: ", nrmse)
+            print(f"Global R2 reproduction: {r2}")
+            print(f"Global NRMSE reproduction: {nrmse}")
     return(modelsolcontainer)
-
-
-
-def efsa_survival(model, dataset):
-    # observed survival probabilities
-    survdata = model.survstruct_list[dataset]
-    for i in range(survdata.ntreats):
-        S_obs = survdata.survprobstreat[i]
-
-    # predicted survival trajectory
-    # S_pred = ... model_output_survival_at_data_times
-
-    # SPPE (EFSA-specific, keep original formula)
-    # sppe = ...
-
-    basic = efsa_basic_metrics(S_obs, S_pred)
-
-    return {**basic, "SPPE": sppe}
-
-
-
-def efsa_length(model, dataset, treatment_index):
-    ldata = model.lengthstruct_list[dataset]
-
-    y_obs = ldata.flatdataclean[treatment_index]
-    weights = ldata.flatweightsclean[treatment_index]
-
-    y_pred = simulated_length_values_at_matching_times
-
-    metrics = efsa_basic_metrics(y_obs, y_pred)
-
-    return metrics
-
-
-
-def efsa_repro(model, dataset, treatment_index):
-    rdata = model.reprostruct_list[dataset]
-
-    y_obs = rdata.flatdataclean[treatment_index]
-    y_pred = simulated_reproduction_values
-
-    metrics = efsa_basic_metrics(y_obs, y_pred)
-
-    return metrics
-
-
-
-def EFSA_quality_criteria_DEB(model, dataset):
-    results = {}
-
-    for tr in range(model.concstruct_list[dataset].ntreats):
-        results[tr] = {}
-
-        if model.survstruct_list[dataset] is not None:
-            results[tr]["survival"] = efsa_survival(model, dataset, tr)
-
-        if model.lengthstruct_list[dataset] is not None:
-            results[tr]["length"] = efsa_length(model, dataset, tr)
-
-        if model.reprostruct_list[dataset] is not None:
-            results[tr]["reproduction"] = efsa_repro(model, dataset, tr)
-
-    return results
 
 
 def validation(full_ds, debparameterclass, parspace_tox):
