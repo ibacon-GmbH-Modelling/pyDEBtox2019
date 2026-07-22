@@ -244,15 +244,22 @@ class dataclass:
         plt.tight_layout()
         plt.show()
 
-    def add_plotdata(self, ax, ntreat, label="Data"):
+    def add_plotdata(self, ax, ntreat, label="Data", wmeans=False):
         '''
         Add data points to an existing axis object.
         '''
         dataarray = self.dataarray[self.treatmentsnames==ntreat]
         maxval = np.nanmax(dataarray)
         minval = min(0,np.nanmin(dataarray))
-        for i in range(len(dataarray)):
-            ax.plot(self.time, dataarray[i], 'o', color='blue')
+        if wmeans:
+                mask = self.uniquetreats==ntreat
+                ax.errorbar(self.time,self.meanvalstransf[mask,:].flatten(), 
+                            yerr=[self.meanvalstransf[mask,:].flatten() - self.lowlimtreat[mask,:].flatten(),
+                                  self.upplimtreat[mask,:].flatten() - self.meanvalstransf[mask,:].flatten()],
+                            fmt='s', label='Weighted mean', color='red')
+        else:
+            for i in range(len(dataarray)):
+                ax.plot(self.time, dataarray[i], 'o', color='blue')
         # ax.set_ylim([minval, maxval*1.1])
         return ax
     
@@ -388,6 +395,10 @@ class survdataclass(dataclass):
             self.lowlimtreat.append(tmplowlim)
             self.upplimtreat.append(tmpupplim)
             self.meanvalstransf.append(tmpprob) #?? check
+        # transform lists in arrays
+        self.meanvalstransf = np.array(self.meanvalstransf)
+        self.lowlimtreat = np.array(self.lowlimtreat)
+        self.upplimtreat = np.array(self.upplimtreat)
 
     def plot_data(self, dataarray=None, label="numbers alive", scaleto1=False, wmeans=False):
         if dataarray is None:
@@ -398,7 +409,7 @@ class survdataclass(dataclass):
                 dataarray[i,:] = dataarray[i,:]/ninit
         return super().plot_data(dataarray=dataarray, label=label, wmeans=wmeans)
     
-    def add_plotdata(self, ax, ntreat, label="Data", scaleto1=False):
+    def add_plotdata(self, ax, ntreat, label="Data", scaleto1=False,wmeans=False):
         '''
         Add data points to an existing axis object.
         '''
@@ -409,8 +420,19 @@ class survdataclass(dataclass):
                 dataarray[i,:] = dataarray[i,:]/ninit
         maxval = np.nanmax(dataarray)
         minval = min(0,np.nanmin(dataarray))
-        for i in range(len(dataarray)):
-            ax.plot(self.time, dataarray[i], 'o', color='blue')
+        if wmeans:
+            mask = self.uniquetreats==ntreat
+            print("mask: ", mask)
+            print("meanvalstransf: ", self.meanvalstransf[mask])
+            print("lowlimtreat: ", self.lowlimtreat[mask])
+            print("upplimtreat: ", self.upplimtreat[mask])
+            ax.errorbar(self.time,self.meanvalstransf[mask].flatten(), 
+                            yerr=[self.meanvalstransf[mask].flatten() - self.lowlimtreat[mask].flatten(),
+                                  self.upplimtreat[mask].flatten() - self.meanvalstransf[mask].flatten()],
+                            fmt='s', label='Weighted mean', color='red')
+        else:
+            for i in range(len(dataarray)):
+                ax.plot(self.time, dataarray[i], 'o', color='blue')
         # ax.set_ylim([minval, maxval*1.1])
         return ax
 
@@ -665,15 +687,22 @@ class reproclass(dataclass):
     def plot_data_cumulative(self, label="Cumulative reproduction", wmeans=False):
         return super().plot_data(dataarray=self.dataarray_cumulative, label=label, wmeans=wmeans)
     
-    def add_plotdata(self, ax, ntreat, label="Data"):
+    def add_plotdata(self, ax, ntreat, label="Data",wmeans=False):
         '''
         Add data points to an existing axis object.
         '''
         dataarray = self.dataarray_cumulative[self.treatmentsnames==ntreat]
         maxval = np.nanmax(dataarray)
         minval = min(0,np.nanmin(dataarray))
-        for i in range(len(dataarray)):
-            ax.plot(self.time, dataarray[i], 'o', color='blue')
+        if wmeans:
+            mask = self.uniquetreats==ntreat
+            ax.errorbar(self.time,self.meanvalstransf[mask,:].flatten(), 
+                        yerr=[self.meanvalstransf[mask,:].flatten() - self.lowlimtreat[mask,:].flatten(),
+                              self.upplimtreat[mask,:].flatten() - self.meanvalstransf[mask,:].flatten()],
+                        fmt='s', label='Weighted mean', color='red')
+        else:
+            for i in range(len(dataarray)):
+                ax.plot(self.time, dataarray[i], 'o', color='blue')
         # ax.set_ylim([minval, maxval*1.1])
         return ax
     

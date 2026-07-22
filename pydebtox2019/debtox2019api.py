@@ -13,14 +13,14 @@ import psutil
 n_cores = psutil.cpu_count(logical=False) # to have the number of physical cores only
 
 
-def plot_DEBresults(parspaceres, CI=True, multicore=True, ds = -1):
+def plot_DEBresults(parspaceres, CI=True, multicore=True, ds = -1, wmeans=False):
     if ds == -1:
         for dataset in range(parspaceres.model.ndatasets):
-            plot_DEBresults_ds(parspaceres, CI=CI, multicore=multicore, dataset=dataset)
+            plot_DEBresults_ds(parspaceres, CI=CI, multicore=multicore, dataset=dataset, wmeans=wmeans)
     else:
-        plot_DEBresults_ds(parspaceres, CI=CI, multicore=multicore, dataset=ds)
+        plot_DEBresults_ds(parspaceres, CI=CI, multicore=multicore, dataset=ds, wmeans=wmeans)
 
-def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0):
+def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0, wmeans=False):
     print("plotting the results")
     # assumes a single dataset for now
     ccl = parspaceres.model.concstruct_list[dataset]
@@ -89,7 +89,7 @@ def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0):
         k=1 # mark endpoint
         ### lengths
         if lcl is not None:
-            lcl.add_plotdata(ax[k,i],treatmentnames[i])
+            lcl.add_plotdata(ax[k,i],treatmentnames[i],wmeans=wmeans)
             ax[k,i].plot(tevals,sol[0][1],'k--')
             ax[k,i].plot(tevals,sol[i][1])
             ax[k,i].set_ylim(0,np.nanmax(lcl.dataarray)*1.1)
@@ -100,7 +100,7 @@ def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0):
             k+=1
         ### reproduction
         if rcl is not None:
-            rcl.add_plotdata(ax[k,i],treatmentnames[i])
+            rcl.add_plotdata(ax[k,i],treatmentnames[i],wmeans=wmeans)
             ax[k,i].plot(tevals,sol[0][2],'k--')
             ax[k,i].plot(tevals,sol[i][2])
             ax[k,i].set_ylim(0,np.nanmax(rcl.dataarray_cumulative)*1.1)
@@ -111,7 +111,7 @@ def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0):
             k+=1
         ### survival
         if scl is not None:
-            scl.add_plotdata(ax[k,i],ntreat=treatmentnames[i], scaleto1=True)
+            scl.add_plotdata(ax[k,i],ntreat=treatmentnames[i], scaleto1=True,wmeans=wmeans)
             ax[k,i].plot(tevals,sol[0][3], 'k--')
             ax[k,i].plot(tevals,sol[i][3])
             ax[k,i].set_ylim=[0,1.1]
@@ -124,147 +124,266 @@ def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0):
     plt.tight_layout()
 
 
+def get_survival_data(model, modelsolcontainer, nd):
 
-def efsa_basic_metrics(y_obs, y_pred, eps=1e-12):
-    # rewrite these equations with the correct ones
-    residuals = y_obs - y_pred
-    rmse = np.sqrt(np.mean(residuals**2))
-    nrmse = rmse / (np.mean(y_obs) + eps)
+    ntreats = model.concstruct_list[nd].ntreats
 
-    ss_res = np.sum(residuals**2)
-    ss_tot = np.sum((y_obs - np.mean(y_obs))**2)
-    r2 = 1 - ss_res / (ss_tot + eps)
+    modelvals = np.array([
+        modelsolcontainer[nd][i][3]
+        for i in range(ntreats)
+    ])
 
-    return dict(R2=r2, NRMSE=nrmse)
+    datavals = model.survstruct_list[nd].survprobstreat
+    counts = model.survstruct_list[nd].survarrtreat
+
+    return modelvals, datavals, counts
+
+
+def calc_r2_nrmse(data, model):
+    valid = ~np.isnan(data)
+    data = data[valid]
+    model = model[valid]
+    nobs = len(data)
+    if nobs == 0:
+        return np.nan, np.nan
+    rss = np.sum((data - model) ** 2)
+    tss = np.sum((data - np.mean(data)) ** 2)
+    r2 = np.nan if tss == 0 else 1 - rss / tss
+    nrmse = np.sqrt(rss / nobs) / np.mean(data)
+    return r2, nrmse
+
+def get_endpoint_data(model, modelsolcontainer, nd, endpoint):
+    ntreats = model.concstruct_list[nd].ntreats
+    if endpoint == 1:
+        struct = model.lengthstruct_list[nd]
+        state_idx = 1
+    elif endpoint == 2:
+        struct = model.reprostruct_list[nd]
+        state_idx = 2
+    else:
+        raise ValueError(endpoint)
+    mask = np.isin(model.timeext[nd], struct.time)
+    modelvals = np.array([
+        modelsolcontainer[nd][i][state_idx][mask]
+        for i in range(ntreats)
+    ])
+    return modelvals, struct.meanvalstransf
+
+def calc_survival_metrics(modelvals, surv_probs, surv_counts):
+
+    ssq_fit_num = 0.0
+    rss = 0.0
+
+    # collect all valid survival probabilities
+    # for calculation of total sum of squares
+    tss_data = []
+
+    # for NRMSE denominator
+    all_counts = []
+
+    for i in range(len(modelvals)):
+
+        probs_i = np.asarray(surv_probs[i])
+        counts_i = np.asarray(surv_counts[i])
+        model_i = np.asarray(modelvals[i])
+
+        valid = ~np.isnan(probs_i)
+
+        nmax = counts_i[0]
+
+        # NRMSE based on counts
+        ssq_fit_num += np.sum(
+            (counts_i[valid] - nmax * model_i[valid]) ** 2
+        )
+
+        # R² residual sum of squares
+        rss += np.sum(
+            (probs_i[valid] - model_i[valid]) ** 2
+        )
+
+        # accumulate valid observations
+        tss_data.extend(probs_i[valid])
+
+        # accumulate counts for mean denominator
+        all_counts.extend(counts_i[valid])
+
+        # ----------------------------------------
+        # future treatment-specific calculations
+        # can be added here
+        #
+        # bias_i = np.mean(model_i[valid] - probs_i[valid])
+        # metrics_per_treatment.append(...)
+        # ----------------------------------------
+
+    tss_data = np.asarray(tss_data)
+
+    if len(tss_data) == 0:
+        return np.nan, np.nan
+
+    tss = np.sum(
+        (tss_data - np.mean(tss_data)) ** 2
+    )
+
+    r2 = np.nan if tss == 0 else 1 - rss / tss
+
+    nrmse = (
+        np.sqrt(ssq_fit_num / len(tss_data))
+        / np.mean(all_counts)
+    )
+
+    return r2, nrmse
 
 
 def efsa_criteria(model):
     from copy import deepcopy
+
     model = deepcopy(model)
+
     basepars = model.parvals.copy()
     basepars[model.islog] = 10 ** basepars[model.islog]
-    modelsolcontainer = [None]*model.ndatasets
+
+    endpoint_names = {
+        0: "survival",
+        1: "length",
+        2: "reproduction"
+    }
+
+    modelsolcontainer = [None] * model.ndatasets
+
+    # ======================================================
+    # Compute model solutions
+    # ======================================================
     for nd in range(model.ndatasets):
+
         modelpars = model.build_dataset_parameters(basepars, nd)
+
         newtime = model.timeext[nd]
-        # need to make sure that there are enough time points being calculated
-        # ensure precision of the ODE solution
-        newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(model.min_t,len(newtime))),newtime)))
-        modelcoltreatcont = [None]*model.concstruct_list[nd].ntreats
+
+        newtimeext = np.unique(
+            np.concatenate((
+                np.linspace(
+                    newtime[0],
+                    newtime[-1],
+                    max(model.min_t, len(newtime))
+                ),
+                newtime
+            ))
+        )
+
+        modelcoltreatcont = [None] * model.concstruct_list[nd].ntreats
+
         for i in range(model.concstruct_list[nd].ntreats):
-            modelsol = model.calc_model(model.concstruct_list[nd].concarraytr[i],
-                                                 model.concstruct_list[nd].timetr,
-                                                 modelpars,
-                                                 model.moa,
-                                                 model.feedb,
-                                                 timeext=newtimeext)
-            idx_targets = np.searchsorted(newtimeext, model.timeext[nd])
-            modelsol = modelsol[:,idx_targets]
+
+            modelsol = model.calc_model(
+                model.concstruct_list[nd].concarraytr[i],
+                model.concstruct_list[nd].timetr,
+                modelpars,
+                model.moa,
+                model.feedb,
+                timeext=newtimeext
+            )
+
+            idx_targets = np.searchsorted(
+                newtimeext,
+                model.timeext[nd]
+            )
+
+            modelsol = modelsol[:, idx_targets]
             modelcoltreatcont[i] = modelsol
+
         modelsolcontainer[nd] = modelcoltreatcont
-        # now all the model solutions have been calculated and stored in modelsolcontainer, 
-        # we can calculate the metrics for each endpoint and treatment.
-        # now need to get the data element and do the calculatations of the criteria
 
-        # this is the reporting of EFSA metrics for each dataset
-        print("Calculating EFSA criteria for dataset %d"%(nd))
-        for endpoint in model.active_endpoints[nd]:
-            ntreats = model.concstruct_list[nd].ntreats
+    # ======================================================
+    # Dataset-specific metrics
+    # ======================================================
+    for nd in range(model.ndatasets):
+
+        print(f"\nCalculating EFSA criteria for dataset {nd}")
+
+        for endpoint in model.active_endpoints[nd]: 
             if endpoint == 0:
-                # survival
-                survmodelvals = np.array([modelsolcontainer[nd][x][3] for x in range(ntreats)]) ## to check properly if the timing is right
-                survdatavals = model.survstruct_list[nd].survprobstreat
-                # DEBUG:
-                # print("model")
-                # print(survmodelvals)
-                # print("data")
-                # print(survdatavals)
-            elif endpoint == 1:
-                # length
-                mask = np.isin(model.timeext[nd], model.lengthstruct_list[nd].time)
-                lengthmodelvals = np.array([modelsolcontainer[nd][x][1][mask] for x in range(ntreats)])
-                lengthdatavals = model.lengthstruct_list[nd].meanvalstransf
-                valid = ~np.isnan(lengthdatavals)
-                nobs = np.sum(valid)  
-                res = lengthdatavals[valid] - lengthmodelvals[valid]
-                restot = lengthdatavals[valid] - np.mean(lengthdatavals[valid])
-                r2 = 1 - np.nansum(res**2)/np.nansum(restot**2)
-                nrmse = (np.sqrt((np.sum(res**2))/nobs))/np.mean(lengthdatavals[valid])
-                print("R2 length: ", r2)
-                print("NRMSE length: ", nrmse)
-            elif endpoint == 2:
-                # reproduction
-                mask = np.isin(model.timeext[nd], model.reprostruct_list[nd].time)
-                repromodelvals = np.array([modelsolcontainer[nd][x][2][mask] for x in range(ntreats)])
-                reprodatavals = model.reprostruct_list[nd].meanvalstransf
-                valid = ~np.isnan(reprodatavals)
-                nobs = np.sum(valid)
-                res = reprodatavals[valid] - repromodelvals[valid]
-                restot = reprodatavals[valid] - np.mean(reprodatavals[valid])
-                r2 = 1 - np.sum(res**2)/np.sum(restot**2)
-                nrmse = np.sqrt(np.sum(res**2/nobs))/np.nanmean(reprodatavals[valid])
-                print("R2 repro: ", r2)
-                print("NRMSE repro: ", nrmse)
-    # calculate now the EFSA criteria for the the common endpoints
-    # for all present datasets
-    common_endpoints = set(model.active_endpoints[0])
-    for nd in range(1, model.ndatasets):
-        common_endpoints &= set(model.active_endpoints[nd])
-    print("\n=== Combined metrics across all datasets ===")
-    for endpoint in sorted(common_endpoints):
-        all_data = []
-        all_model = []
-        for nd in range(model.ndatasets):
-            ntreats = model.concstruct_list[nd].ntreats
-            if endpoint == 1:
-                # length
-                mask = np.isin(
-                    model.timeext[nd],
-                    model.lengthstruct_list[nd].time
+                modelvals, datavals, counts = (
+                    get_survival_data(
+                        model,
+                        modelsolcontainer,
+                        nd
+                    )
                 )
-                modelvals = np.array([
-                    modelsolcontainer[nd][x][1][mask]
-                    for x in range(ntreats)
-                ])
-                datavals = model.lengthstruct_list[nd].meanvalstransf
-            elif endpoint == 2:
-                # reproduction
-                mask = np.isin(
-                    model.timeext[nd],
-                    model.reprostruct_list[nd].time
+
+                r2, nrmse = calc_survival_metrics(
+                    modelvals,
+                    datavals,
+                    counts
                 )
-                modelvals = np.array([
-                    modelsolcontainer[nd][x][2][mask]
-                    for x in range(ntreats)
-                ])
-                datavals = model.reprostruct_list[nd].meanvalstransf
+
             else:
-                # skip endpoints for which metrics are not implemented
-                continue
-            # keep only valid observations
-            valid = ~np.isnan(datavals)
-            all_data.append(datavals[valid])
-            all_model.append(modelvals[valid])
-        if len(all_data) == 0:
-            continue
+                modelvals, datavals = get_endpoint_data(
+                    model,
+                    modelsolcontainer,
+                    nd,
+                    endpoint
+                )
 
-        all_data = np.concatenate(all_data)
-        all_model = np.concatenate(all_model)
-        nobs = len(all_data)
-        res = all_data - all_model
-        restot = all_data - np.mean(all_data)
-        r2 = 1 - np.sum(res**2) / np.sum(restot**2)
-        nrmse = np.sqrt(np.sum(res**2) / nobs) / np.mean(all_data)
-        if endpoint == 1:
-            print(f"Global R2 length: {r2}")
-            print(f"Global NRMSE length: {nrmse}")
-        elif endpoint == 2:
-            print(f"Global R2 reproduction: {r2}")
-            print(f"Global NRMSE reproduction: {nrmse}")
-    return(modelsolcontainer)
+                r2, nrmse = calc_r2_nrmse(
+                    datavals,
+                    modelvals
+                )
 
+            print(
+                f"R2 {endpoint_names[endpoint]}: {r2}"
+            )
 
-def validation(full_ds, debparameterclass, parspace_tox):
+            print(
+                f"NRMSE {endpoint_names[endpoint]}: {nrmse}"
+            )
+    if model.ndatasets > 1:
+        print("\n=== Combined metrics across datasets ===")
+        print("Note: Only endpoints present in all datasets are considered.")
+        # ======================================================
+        # Combined metrics across datasets
+        # ======================================================
+        common_endpoints = set(model.active_endpoints[0])
+        for nd in range(1, model.ndatasets):
+            common_endpoints &= set(model.active_endpoints[nd])
+        for endpoint in sorted(common_endpoints):
+            if endpoint == 0:
+                all_model = []
+                all_data = []
+                all_counts = []
+                for nd in range(model.ndatasets):
+                    modelvals, datavals, counts = (get_survival_data(model,
+                                                                     modelsolcontainer,
+                                                                     nd))
+
+                    all_model.append(modelvals)
+                    all_data.append(datavals)
+                    all_counts.append(counts)
+                all_model = np.concatenate(all_model, axis=0)
+                all_data = np.concatenate(all_data, axis=0)
+                all_counts = np.concatenate(all_counts, axis=0)
+
+                r2, nrmse = calc_survival_metrics(all_model,all_data,all_counts)
+            else:
+                all_model = []
+                all_data = []
+                for nd in range(model.ndatasets):
+                    modelvals, datavals = get_endpoint_data(model,modelsolcontainer,
+                                                            nd,endpoint)
+                    valid = ~np.isnan(datavals)
+                    all_model.append(modelvals[valid])
+                    all_data.append(datavals[valid])
+                if not all_data:
+                    continue
+
+                all_model = np.concatenate(all_model)
+                all_data = np.concatenate(all_data)
+
+                r2, nrmse = calc_r2_nrmse(all_data,all_model)
+            print(f"Global R2 {endpoint_names[endpoint]}: {r2}")
+            print(f"Global NRMSE {endpoint_names[endpoint]}: {nrmse}\n")
+    #return modelsolcontainer
+
+def validation(full_ds, debparameterclass, parspace_tox, CI=True, multicore=True,wmeans=False):
     """
     Validation for a new dataset using the parameters obtained from a previous calibration.
     This function should be called only after the physiological model for the new dataset has
@@ -292,7 +411,8 @@ def validation(full_ds, debparameterclass, parspace_tox):
     physioparspace = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)
     # copy the propagation set into the new instance of parspace.
     physioparspace.propagationset = parspace_tox.propagationset # DANGER!!! NEEDS TESTING!!
-    plot_DEBresults(physioparspace,CI=True,multicore=True)
+    plot_DEBresults(physioparspace,CI=CI,multicore=multicore,wmeans=wmeans)
+    efsa_criteria(physioparspace.model)
 
 
 def build_dataset_variants(ccl, lcl, rcl, scl, control_type='both'):
@@ -598,234 +718,3 @@ class DEBparameters:
             if self.full_islog[i]:
                 self.full_lowlim[i] = np.log10(self.full_lowlim[i])
                 self.full_uplim[i] = np.log10(self.full_uplim[i])
-
-
-
-
-
-
-# class DEBparameters:
-#     def __init__(self, DEBpars, ndatasets=1):
-#         self.DEBpars = DEBpars
-#         self.ndatasets = ndatasets
-        
-#         def parse_parameter_block(block):
-#             vals = []
-#             names = []
-#             isfree = []
-#             islog = []
-#             low = []
-#             high = []
-#             owners = []
-        
-#             for pname, pinfo in block.items():
-            
-#                 scope = pinfo.get("scope", "shared")
-        
-#                 if scope == "shared":
-#                     vals.append(pinfo["value"])
-#                     names.append(pname)
-#                     isfree.append(pinfo["fixed"] == 0)
-#                     islog.append(pinfo["islog"] == 1)
-#                     low.append(pinfo["min"])
-#                     high.append(pinfo["max"])
-#                     owners.append(-1)
-        
-#                 elif scope == "dataset":
-#                     ds = pinfo["datasets"]
-#                     values = pinfo["value"]
-        
-#                     if len(ds) != len(values):
-#                         raise ValueError(f"{pname}: datasets and values must match length")
-        
-#                     for d, v in zip(ds, values):
-#                         vals.append(v)
-#                         names.append(f"{pname}_ds{d}")
-#                         isfree.append(pinfo["fixed"] == 0)
-#                         islog.append(pinfo["islog"] == 1)
-#                         low.append(pinfo["min"])
-#                         high.append(pinfo["max"])
-#                         owners.append(d)
-        
-#                 else:
-#                     raise ValueError(f"Unknown scope '{scope}' for parameter {pname}")
-        
-#             return vals, names, isfree, islog, low, high, owners
-
-        
-#         self.global_parvals = np.array(list(DEBpars["global_parameters"].values()))
-#         self.global_parnames = np.array(list(DEBpars["global_parameters"].keys()))
-#         self.global_isfree = np.zeros(len(self.global_parvals), dtype=bool)
-#         self.global_islog = np.zeros(len(self.global_parvals), dtype=bool)
-#         self.global_lowlim = np.zeros(len(self.global_parvals))
-#         self.global_uplim = np.zeros(len(self.global_parvals))
-#         self.global_owner = np.full(len(self.global_parvals), -1)
-
-#         phys_vals, phys_names, phys_free, phys_log, phys_low, phys_high, phys_owner = \
-#             parse_parameter_block(DEBpars["physiological_model"])
-
-#         spec_vals, spec_names, spec_free, spec_log, spec_low, spec_high, spec_owner = \
-#             parse_parameter_block(DEBpars["special_cases"])
-
-#         tox_vals, tox_names, tox_free, tox_log, tox_low, tox_high, tox_owner = \
-#             parse_parameter_block(DEBpars["tox_parameters"])
-
-        
-#         # make complete 
-#         self.full_list = np.array(
-#             list(self.global_parvals) + phys_vals + spec_vals + tox_vals
-#         )
-
-#         self.full_names = np.array(
-#             list(self.global_parnames) + phys_names + spec_names + tox_names,
-#             dtype=object
-#         )
-
-#         self.full_base_names = np.array([self.base_name(n) for n in self.full_names])
-
-#         self.full_isfree = np.concatenate([
-#             self.global_isfree,
-#             np.array(phys_free),
-#             np.array(spec_free),
-#             np.array(tox_free)
-#         ])
-
-#         self.full_islog = np.concatenate([
-#             self.global_islog,
-#             np.array(phys_log),
-#             np.array(spec_log),
-#             np.array(tox_log)
-#         ])
-
-#         self.full_lowlim = np.concatenate([
-#             self.global_lowlim,
-#             np.array(phys_low),
-#             np.array(spec_low),
-#             np.array(tox_low)
-#         ])
-
-#         self.full_uplim = np.concatenate([
-#             self.global_uplim,
-#             np.array(phys_high),
-#             np.array(spec_high),
-#             np.array(tox_high)
-#         ])
-
-#         self.par_dataset_map = np.concatenate([
-#             self.global_owner,
-#             np.array(phys_owner),
-#             np.array(spec_owner),
-#             np.array(tox_owner)
-#         ])
-
-    
-#     def base_name(self, pname):
-#         """
-#         Returns logical parameter name without dataset suffix.
-#         Lp_ds0 → Lp
-#         Lm → Lm
-#         """
-#         return pname.split("_ds")[0]
-
-
-#     def set_freefix_parameters(self, parname, isfree):    
-#         mask = self.full_base_names == parname
-#         if not np.any(mask):
-#             raise ValueError(f"Parameter '{parname}' not found.")
-#         self.full_isfree[mask] = isfree
-
-#     def set_freefix_parameters_list(self, parname, isfree):
-#         for name in parname:
-#             self.set_freefix_parameters(name, isfree)
-
-
-#     def set_free_onlyone(self, parname, isfree=True):
-#         self.full_isfree[:] = False
-#         mask = self.full_base_names == parname
-#         if not np.any(mask):
-#             raise ValueError(f"Parameter '{parname}' not found.")
-#         self.full_isfree[mask] = isfree
-
-        
-#     def fixfree_physio_pars(self,isfree=False):
-#         # option 1
-#         # self.full_isfree[len(self.global_parvals):len(self.global_parvals)+len(self.physio_parvals)] = False
-#         # option 2
-#         for i, name in enumerate(self.physio_parnames):
-#             self.set_freefix_parameters(name, isfree)
-#         for i, name in enumerate(self.special_parnames):
-#             self.set_freefix_parameters(name, isfree)
-
-#     def fixfree_tox_pars(self,isfree=False):
-#         # option 1
-#         # self.full_isfree[-len(self.tox_parvals):] = False
-#         # option 2
-#         for i, name in enumerate(self.tox_parnames):
-#             self.set_freefix_parameters(name, isfree)
-    
-#     def update_posfree(self):
-#         self.posfree = np.where(self.full_isfree)[0]
-
-#     def get_indices_by_param(self, parname):
-#         return np.where(self.full_base_names == parname)[0]
-    
-#     def get_shared_indices(self):
-#         return np.where(self.par_dataset_map == -1)[0]
-    
-#     def get_dataset_indices(self, nd):
-#         return np.where(self.par_dataset_map == nd)[0]
-    
-#     def preset_toxlimits(self, moa, feedb, concclass):
-#         '''
-#         This function automatically estimates the lower and upper boundary
-#         of the toxicity parameters based on exposure and feedback mechanisms 
-#         '''
-#         # set limits of the parameters
-#         treatments=concclass.concmax[concclass.concmax>0]
-
-#         # kd parameter
-#         kdlowlim = 0.01
-#         kduplim = 10
-#         self.full_lowlim[self.full_names=='kd'] = kdlowlim
-#         self.full_uplim[self.full_names=='kd'] = kduplim
-
-#         # zb parameter
-#         self.full_lowlim[self.full_names=='zb']  = treatments.min()*(1-np.exp(-kdlowlim*(4./24.)))
-#         self.full_uplim[self.full_names=='zb']  = treatments.max()*0.99
-
-#         # zs parameter
-#         self.full_lowlim[self.full_names=='zs']  = treatments.min()*(1-np.exp(-kdlowlim*(4./24.)))
-#         self.full_uplim[self.full_names=='zs']  = treatments.max()*0.99
-#         # for this specific combination, damage can be larger than external concentration
-#         if feedb[0] == 1 & feedb[1] == 0:
-#             self.full_uplim[self.full_names=='zb'] = 2*treatments.max() # so increase the threshold
-#             self.full_uplim[self.full_names=='zs']  = 2*treatments.max()
-
-#         # bb and bs parameters. These are usually in log scale, so the limits need to be given in log scale as well.
-#         bslowlim = -np.log(0.9) / (treatments.max()*concclass.time.max())
-#         bsuplim = (2**2*0.95) /(0.01*treatments.max()*np.exp(-kdlowlim*concclass.time.max()*0.5))
-#         self.full_lowlim[self.full_names=='bs']  = bslowlim
-#         self.full_uplim[self.full_names=='bs']   = bsuplim
-#         # if debparameterclass.full_isfree[debparameterclass.full_names=='bb'] == 1:
-#         if moa[0] == 1:
-#             bblowlim  = 0.2 / treatments.max()
-#             bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-#         elif moa[1] == 1:
-#             bblowlim = 0.2 / treatments.max()
-#             bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-#         elif moa[2] == 1:
-#             bblowlim = 0.2 / treatments.max()
-#             bbuplim = 10 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-#         elif moa[3] == 1:
-#             bblowlim = 0.5 / treatments.max()
-#             bbuplim = 2000 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-#         elif moa[4] == 1:
-#             bblowlim = 0.2 / treatments.max()
-#             bbuplim = 200 / (treatments.max() * (1-np.exp(-kdlowlim*concclass.time.max())))
-#         self.full_lowlim[self.full_names=='bb'] = bblowlim
-#         self.full_uplim[self.full_names=='bb'] = bbuplim
-#         # now trasnform in log if the parameter is in log scale
-#         for i in range(len(self.full_names)):
-#             if self.full_islog[i]:
-#                 self.full_lowlim[i] = np.log10(self.full_lowlim[i])
-#                 self.full_uplim[i] = np.log10(self.full_uplim[i])
