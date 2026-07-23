@@ -415,6 +415,338 @@ def validation(full_ds, debparameterclass, parspace_tox, CI=True, multicore=True
     efsa_criteria(physioparspace.model)
 
 
+def predict_exposure(
+    model,
+    concclass,
+    dataset=0,
+    return_time=None,
+    solver_points=1000,
+    plot=False,
+    ci=False,
+    parspace=None,
+    figsize=(10, 8),
+):
+    """
+    Predict DEBtox2019 responses for an arbitrary exposure profile.
+
+    Parameters
+    ----------
+    model : DEBtox2019models
+        Fitted DEBtox model.
+
+    concclass : concentration object
+        Exposure object containing:
+            concarraytr
+            timetr
+
+    dataset : int, optional
+        Dataset-specific parameterization to use.
+
+    return_time : array-like, optional
+        Time points at which numerical predictions are returned.
+        If None, concclass.timetr is used.
+
+    solver_points : int, optional
+        Number of internal points used for model solution.
+
+    plot : bool, optional
+        Produce plots.
+
+    ci : bool, optional
+        Calculate confidence intervals.
+
+    parspace : PyParspace, optional
+        Required when ci=True.
+
+    figsize : tuple
+        Figure size.
+
+    Returns
+    -------
+    dict
+        Dictionary containing predictions and optional CI.
+    """
+
+    # ==========================================================
+    # exposure profile
+    # ==========================================================
+
+    exposure_time = np.asarray(concclass.timetr)
+
+    if hasattr(concclass, "concarraytr"):
+
+        if np.ndim(concclass.concarraytr) > 1:
+
+            if len(concclass.concarraytr) != 1:
+                raise ValueError(
+                    "Prediction exposure should contain exactly one treatment."
+                )
+
+            C = np.asarray(concclass.concarraytr[0])
+
+        else:
+            C = np.asarray(concclass.concarraytr)
+
+    else:
+        raise AttributeError(
+            "concclass must contain attribute 'concarraytr'"
+        )
+
+    # ==========================================================
+    # fine grid for solving
+    # ==========================================================
+
+    solver_time = np.unique(
+        np.concatenate(
+            (
+                np.linspace(
+                    exposure_time.min(),
+                    exposure_time.max(),
+                    solver_points,
+                ),
+                exposure_time,
+            )
+        )
+    )
+
+    # ==========================================================
+    # output time vector
+    # ==========================================================
+
+    if return_time is None:
+        return_time = exposure_time
+
+    return_time = np.asarray(return_time)
+
+    # ==========================================================
+    # parameter handling
+    # ==========================================================
+
+    expanded_pars = model.parvals.copy()
+
+    expanded_pars[model.islog] = (
+        10 ** expanded_pars[model.islog]
+    )
+
+    debpars = model.build_dataset_parameters(
+        expanded_pars,
+        dataset,
+    )
+
+    # ==========================================================
+    # main prediction
+    # ==========================================================
+
+    fine_sol = model.calc_model(
+        C=C,
+        timextr=exposure_time,
+        DEBpars=debpars,
+        moa=model.moa,
+        feedb=model.feedb,
+        timeext=solver_time,
+    )
+
+    output_sol = np.vstack(
+        [
+            np.interp(
+                return_time,
+                solver_time,
+                fine_sol[i],
+            )
+            for i in range(4)
+        ]
+    )
+
+    # ==========================================================
+    # confidence intervals
+    # ==========================================================
+
+    ci_low = None
+    ci_upp = None
+
+    output_low = None
+    output_upp = None
+
+    if ci:
+
+        if parspace is None:
+            raise ValueError(
+                "parspace must be supplied when ci=True"
+            )
+
+        nprop = len(parspace.propagationset)
+
+        all_ci = np.zeros(
+            (
+                nprop,
+                len(solver_time),
+                4,
+            )
+        )
+
+        for ip, pars in enumerate(parspace.propagationset):
+
+            expanded = np.copy(model.parvals)
+
+            expanded[parspace.posfree] = pars
+
+            expanded = np.where(
+                model.islog,
+                10 ** expanded,
+                expanded,
+            )
+
+            solver_pars = model.build_dataset_parameters(
+                expanded,
+                dataset,
+            )
+
+            sol_ci = model.calc_model(
+                C=C,
+                timextr=exposure_time,
+                DEBpars=solver_pars,
+                moa=model.moa,
+                feedb=model.feedb,
+                timeext=solver_time,
+            )
+
+            all_ci[ip] = sol_ci.T
+
+        ci_low = all_ci.min(axis=0)
+        ci_upp = all_ci.max(axis=0)
+
+        output_low = np.vstack(
+            [
+                np.interp(
+                    return_time,
+                    solver_time,
+                    ci_low[:, i],
+                )
+                for i in range(4)
+            ]
+        )
+
+        output_upp = np.vstack(
+            [
+                np.interp(
+                    return_time,
+                    solver_time,
+                    ci_upp[:, i],
+                )
+                for i in range(4)
+            ]
+        )
+
+    # ==========================================================
+    # output dictionary
+    # ==========================================================
+
+    result = {
+        "time": return_time,
+        "damage": output_sol[0],
+        "length": output_sol[1],
+        "reproduction": output_sol[2],
+        "survival": output_sol[3],
+        "raw": output_sol,
+        "solver_time": solver_time,
+        "fine_solution": fine_sol,
+    }
+
+    if ci:
+
+        result["ci_low"] = {
+            "damage": output_low[0],
+            "length": output_low[1],
+            "reproduction": output_low[2],
+            "survival": output_low[3],
+        }
+
+        result["ci_upp"] = {
+            "damage": output_upp[0],
+            "length": output_upp[1],
+            "reproduction": output_upp[2],
+            "survival": output_upp[3],
+        }
+
+    # ==========================================================
+    # plotting
+    # ==========================================================
+
+    if plot:
+
+        fig, ax = plt.subplots(
+            2,
+            2,
+            figsize=figsize,
+            sharex=True,
+        )
+
+        labels = [
+            "Damage",
+            "Length",
+            "Reproduction",
+            "Survival",
+        ]
+
+        for i, axi in enumerate(ax.flat):
+
+            # central prediction
+            axi.plot(
+                solver_time,
+                fine_sol[i],
+                lw=2,
+                color="C0",
+                label="Prediction",
+            )
+
+            # confidence interval
+            if ci:
+
+                axi.fill_between(
+                    solver_time,
+                    ci_low[:, i],
+                    ci_upp[:, i],
+                    color="gray",
+                    alpha=0.4,
+                    label="95% CI",
+                )
+
+            # returned values
+            axi.plot(
+                return_time,
+                output_sol[i],
+                "o",
+                color="C0",
+                ms=4,
+                label="Returned values",
+            )
+
+            axi.set_title(labels[i])
+            axi.grid(True)
+
+        ax[1, 0].set_xlabel("Time (d)")
+        ax[1, 1].set_xlabel("Time (d)")
+
+        ax[0, 0].set_ylabel("Damage")
+        ax[0, 1].set_ylabel("Length")
+        ax[1, 0].set_ylabel("Reproduction")
+        ax[1, 1].set_ylabel("Survival")
+
+        handles, labels = ax[0, 0].get_legend_handles_labels()
+
+        fig.legend(
+            handles,
+            labels,
+            loc="upper right",
+        )
+
+        plt.tight_layout()
+
+        result["figure"] = fig
+
+    return result
+
+
 def build_dataset_variants(ccl, lcl, rcl, scl, control_type='both'):
     full_ds   = completedataset(concdata=ccl, lendata=lcl, reprodata=rcl, survdata=scl)
     # controls = by label value; your control values are 0 and/or 0.1 in the first row/headers

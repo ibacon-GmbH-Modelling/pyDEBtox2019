@@ -104,9 +104,12 @@ class concclass:
                 figname (str): The base name of the file to save the figure. Default is an empty string.
                 extension (str): The file extension for the saved figure. Default is '.png'.
     """
-    def __init__(self,concdata,name,concunits):
+    def __init__(self,concdata,name,concunits,focus = False):
         self.name = name # to store the origin of the data
-        self.concdata = concdata[1:,:] # remove the first line as it is the names of the treatments
+        if focus:
+            self.concdata = concdata
+        else:
+            self.concdata = concdata[1:,:] # remove the first line as it is the names of the treatments
         self.ntreats = concdata.shape[1] - 1
         self.conctreatsnames = concdata[0,1:]
         self.timetr = self.concdata[:,0] # needed only for plotting
