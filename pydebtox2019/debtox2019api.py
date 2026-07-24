@@ -946,10 +946,12 @@ class DEBparameters:
         self.update_posfree()
 
     def fixfree_physio_pars(self, isfree=False):
+        physio_keys = {k.lower() for k in self.DEBpars["physiological_model"]}
+        special_keys = {k.lower() for k in self.DEBpars["special_cases"]}
+
         physio_names = np.unique([
             n for n in self.full_base_names
-            if n in self.DEBpars["physiological_model"]
-            or n in self.DEBpars["special_cases"]
+            if ((n in physio_keys) or (n in special_keys))
         ])
         for n in physio_names:
             self.set_freefix_parameters(n, isfree)

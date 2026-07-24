@@ -43,23 +43,18 @@ if __name__ == "__main__":
 
 
     # isolate the controls    
-    full_ds, control_ds = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='both')
+    full_ds, control_ds, ph = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='both')
     
     # take only the survival data from the controls
-    _,hbonly = dt2019.build_dataset_variants(ccl=ccl, lcl=None,rcl=None,scl=scl,control_type='both')
+    _,hbonly,_ = dt2019.build_dataset_variants(ccl=ccl, lcl=None,rcl=None,scl=scl,control_type='both')
 
     # set the parameter limits to start the grid search
-    dt2019.preset_toxlimits(debparameters, moas, feedbs, ccl)
+    debparameters.preset_toxlimits(moas, feedbs, ccl)
 
     debmodeltest = mm.DEBtox2019models([full_ds],
-                                       debparameters.full_list,
-                                       debparameters.full_names,
-                                       debparameters.full_islog, 
-                                       debparameters.full_isfree, 
-                                       debparameters.full_lowlim,
-                                       debparameters.full_uplim,
-                                       moas, feedbs, Tbp=3,
-                                       breaktime=1,
+                                       debparameters,
+                                       moas, feedbs, Tbp=0,
+                                       breaktime=0,
                                        solver='LSODA')
     
     # transform in log scale when needed avoiding nan values due to log(0)
@@ -67,14 +62,19 @@ if __name__ == "__main__":
     # In the standard workflow, the likelihood is called by the parspace class
     # that takes care internally to transform the parameters in log scale when 
     # needed and to transform them back when calling the model.
-    listparswlog = debparameters.full_list.copy()
-    newlistpars = np.zeros_like(listparswlog)
-    for i,par in enumerate(listparswlog):
-        newlistpars[i] = np.log10(par) if debparameters.full_islog[i] else par
+
+
+
+    # listparswlog = debparameters.full_list.copy()
+    # newlistpars = np.zeros_like(listparswlog)
+    # for i,par in enumerate(listparswlog):
+    #     newlistpars[i] = np.log10(par) if debparameters.full_islog[i] else par
     
     parspace = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)  
-    lk = debmodeltest.log_likelihood(newlistpars[debmodeltest.posfree],newlistpars,debmodeltest.posfree)
-    print(lk)
+    # lk = debmodeltest.log_likelihood(newlistpars[debmodeltest.posfree],newlistpars,debmodeltest.posfree)
+    # print(lk)
+
+
     dt2019.plot_DEBresults(parspace,CI=False,multicore=False) 
     '''
     debparameters.set_free_onlyone("hb", isfree=True)
@@ -133,20 +133,16 @@ if __name__ == "__main__":
     debparameters.fixfree_physio_pars(isfree=False)
     debparameters.fixfree_tox_pars(isfree=True)
     '''
+    print("Starting the tox model fit")
     debparameters.fixfree_physio_pars(isfree=False)
     debparameters.fixfree_tox_pars(isfree=True)
     debmodeltest = mm.DEBtox2019models([full_ds],
-                                       debparameters.full_list,
-                                       debparameters.full_names,
-                                       debparameters.full_islog, 
-                                       debparameters.full_isfree, 
-                                       debparameters.full_lowlim,
-                                       debparameters.full_uplim,
-                                       moas, feedbs, Tbp=3,
+                                       debparameters,
+                                       moas, feedbs, Tbp=0,
                                        breaktime=1,
                                        solver='LSODA')
     
-    parspace_tox = ps.PyParspace(ps.SettingParspace(1,0), debmodeltest)
+    parspace_tox = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)
     startt = time.time()
     parspace_tox.run_parspace()
     endt = time.time()
