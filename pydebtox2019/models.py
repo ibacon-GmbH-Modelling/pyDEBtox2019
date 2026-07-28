@@ -2,8 +2,11 @@ import numpy as np
 from numba import jit
 from scipy.integrate import odeint,solve_ivp
 from scipy.optimize import brentq
+import multiprocessing as mp
+import psutil
+n_cores = psutil.cpu_count(logical=False) # to have the number of physical cores only
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
 #def DEBtox2019_derivatives(y, t, C, timextr, DEBpars, moa, feedb):
     # y0 damage
@@ -68,7 +71,7 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
 
     return(dydt)
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def DEBtox2019_derivatives_odeint(y, t, C, timextr, DEBpars, moa, feedb):
     # y0 damage
     # y1 length
@@ -153,7 +156,7 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
         raise ValueError("Solver not recognized. Use 'RK45' or 'LSODA'.")
 
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def survival_loglikelihood(modelvector, commontime, deathvector):
     # print(commontime)
     surviv_selected = modelvector[commontime]
@@ -165,7 +168,7 @@ def survival_loglikelihood(modelvector, commontime, deathvector):
     return(llik)
 
 
-@jit(nopython=True)
+@jit(nopython=True, cache=True)
 def scaled_loglikelihood(model,lengths,weights,transf):
     # print("model:", model)
     # print("lengths:", lengths)
@@ -537,8 +540,16 @@ class DEBtox2019models:
         def response(C, t):
             Cprofile = np.array([C, C])
             tprofile = np.array([0.0, t])
+            # NOTE: timeext must NOT be a bare 2-point [0, t] array here. With
+            # solver='LSODA' (odeint/LSODA), the mxstep budget (default 500)
+            # applies PER INTERVAL between consecutive requested time points,
+            # not to the whole integration. A 2-point request forces the
+            # entire (potentially stiff, high-concentration) integration into
+            # a single 500-step budget; if exceeded, odeint silently returns
+            # a corrupted result with only a non-fatal warning. A denser grid
+            # gives each sub-interval its own step budget and avoids this.
             sol = self.calc_model(Cprofile, tprofile, modelpars, self.moa, self.feedb,
-                                   timeext=np.array([0.0, t]))
+                                   timeext=np.linspace(0.0, t, 50))
             return sol[:, -1]
 
         results = {ep: {x: np.full(Tend_arr.shape, np.nan) for x in X} for ep in endpoints}
@@ -626,9 +637,66 @@ class DEBtox2019models:
 
         return np.asarray(t_list), np.asarray(c_list)
 
+    @staticmethod
+    def _prune_windows_mask(exposure_time, exposure_conc, window_starts, Twin):
+        """
+        Prune the set of candidate window start times to the ones that
+        could possibly be the worst case. This is the pyDEBtox2019
+        equivalent of prune_windows.m (BYOM, trick by Neil Sherborne):
+        first find, across all candidate windows, the largest *minimum*
+        concentration (the window whose floor is highest); any window
+        whose *maximum* concentration is below that value cannot be the
+        worst case, since there is always some other window where
+        exposure is at least as high at every point in time within it.
+
+        This relies on a monotonic dose-response relationship and, per the
+        original MATLAB implementation, is not advised when there are
+        feedbacks on the elimination rate combined with an
+        assimilation/maintenance/growth mode of action - under those
+        conditions the worst case may not be unique, and pruning could
+        discard the true worst window.
+
+        Returns a boolean array (True = keep, False = pruned), aligned
+        with `window_starts`.
+        """
+        mins = np.empty(window_starts.shape)
+        maxs = np.empty(window_starts.shape)
+        for i, ts in enumerate(window_starts):
+            _, c_list = DEBtox2019models._window_profile(exposure_time, exposure_conc, ts, Twin)
+            mins[i] = c_list.min()
+            maxs[i] = c_list.max()
+        maxmin = mins.max()
+        return maxs >= maxmin
+
+    def _epx_window_task(self, exposure_time, exposure_conc, ts, tw, si, control_val, target,
+                          modelpars, mflow0, mfhigh0, max_expand, xtol):
+        """
+        Compute the critical multiplication factor for a single moving-
+        time-window position. This is the unit of work dispatched to
+        worker processes when calc_epx_core is run with multicore=True
+        (it is a plain, self-contained function of its arguments - no
+        shared/global state - so, unlike BYOM's MATLAB implementation
+        which stores the exposure scenario in a global and therefore
+        cannot parallelize across windows, this can be run independently
+        on any core).
+        """
+        def f(logMF):
+            MF = 10 ** logMF
+            t_list, c_list = self._window_profile(exposure_time, exposure_conc, ts, tw)
+            # see the NOTE in calc_ecx_core.response: a bare 2-point timeext
+            # can silently corrupt LSODA results for stiff/high-concentration
+            # windows, since odeint's mxstep budget applies per interval.
+            sol = self.calc_model(MF * c_list, t_list, modelpars, self.moa, self.feedb,
+                                   timeext=np.linspace(0.0, tw, 50))
+            effect = 1.0 - sol[si, -1] / control_val
+            return effect - target
+
+        return self._bisect_log(f, mflow0, mfhigh0, max_expand, xtol, increasing=True)
+
     def calc_epx_core(self, modelpars, exposure_time, exposure_conc, Twin,
                        X=(10, 50), endpoints=(0, 1, 2), Tstep=1.0,
-                       MF_bounds=(1e-3, 1e3), max_expand=60, xtol=1e-8):
+                       MF_bounds=(1e-3, 1e3), max_expand=60, xtol=1e-8,
+                       prune_win=False, multicore=False):
         """
         Core (numerical) EPx/LPx calculation for a single, fixed
         dataset-specific parameter vector. This is the pyDEBtox2019
@@ -644,19 +712,19 @@ class DEBtox2019models:
         _window_profile).
 
         For each window position, a per-window critical multiplication
-        factor is found by bisection: the value MF(t_start) that, applied
-        to the whole profile, makes the endpoint at the end of that single
-        window (run from a "fresh", undamaged organism) reach exactly X%
-        effect relative to an unexposed control run over the same
-        duration. Because effect increases monotonically with MF, the
-        overall EPx/LPx is the *minimum* of this per-window curve (the
-        window that is easiest to push to X% effect is the worst case),
-        and the window start at that minimum is the worst-case window
-        time. This is mathematically equivalent to (and no more expensive
-        than) first finding, for a trial MF, the worst effect over all
-        windows and then bisecting on MF - but it additionally yields the
-        full per-window MF(t_start) curve as a natural by-product, useful
-        for diagnostics/plotting.
+        factor is found by bisection (see _epx_window_task): the value
+        MF(t_start) that, applied to the whole profile, makes the endpoint
+        at the end of that single window (run from a "fresh", undamaged
+        organism) reach exactly X% effect relative to an unexposed control
+        run over the same duration. Because effect increases monotonically
+        with MF, the overall EPx/LPx is the *minimum* of this per-window
+        curve (the window that is easiest to push to X% effect is the
+        worst case), and the window start at that minimum is the
+        worst-case window time. This is mathematically equivalent to (and
+        no more expensive than) first finding, for a trial MF, the worst
+        effect over all windows and then bisecting on MF - but it
+        additionally yields the full per-window MF(t_start) curve as a
+        natural by-product, useful for diagnostics/plotting.
 
         Survival (endpoint 0) yields LPx (lethal profile factor); length
         and reproduction (endpoints 1, 2) yield EPx (effect profile
@@ -674,6 +742,16 @@ class DEBtox2019models:
         - MF_bounds: initial (low, high) bracket for the multiplication
           factor search; automatically expanded if needed.
         - max_expand, xtol: passed to the bracket search / brentq.
+        - prune_win: if True, skip windows that provably cannot be the
+          worst case before running any bisection on them (see
+          _prune_windows_mask); their mf_curve entry stays NaN.
+        - multicore: if True, distribute the per-window bisections (for
+          each Twin/endpoint/X combination) across worker processes using
+          a multiprocessing.Pool sized to the number of physical cores.
+          Do NOT set this True when calc_epx_core is itself already being
+          run inside a worker process (e.g. from worker_epx during CI
+          propagation with multicore Pool) - nested pools are not
+          supported by Python's multiprocessing.
 
         Returns:
         - dict: results[endpoint][x] -> dict with:
@@ -686,7 +764,8 @@ class DEBtox2019models:
                      start times that were scanned.
             'mf_curve': list (one array per Twin entry) of the per-window
                      critical MF at each of those window starts (NaN where
-                     that window alone could not reach the target effect).
+                     that window alone could not reach the target effect,
+                     or was skipped by pruning).
         """
         exposure_time = np.asarray(exposure_time, dtype=float)
         exposure_conc = np.asarray(exposure_conc, dtype=float)
@@ -694,12 +773,6 @@ class DEBtox2019models:
         prof_start = exposure_time[0]
         prof_end = exposure_time[-1]
         mflow0, mfhigh0 = MF_bounds
-
-        def window_endpoint(MF, ts, tw, si):
-            t_list, c_list = self._window_profile(exposure_time, exposure_conc, ts, tw)
-            sol = self.calc_model(MF * c_list, t_list, modelpars, self.moa, self.feedb,
-                                   timeext=np.array([0.0, tw]))
-            return sol[si, -1]
 
         results = {
             ep: {
@@ -714,50 +787,76 @@ class DEBtox2019models:
             for ep in endpoints
         }
 
-        for iw, tw in enumerate(Twin_arr):
-            if tw <= 0:
-                continue
-            # window starts: a regular Tstep grid spanning from a window that
-            # just reaches the profile's first point (start = prof_start - tw)
-            # to one that starts exactly at the profile's last point
-            window_starts = np.arange(prof_start - tw, prof_end + 0.5 * Tstep, Tstep)
-            control = self.calc_model(np.zeros(2), np.array([0.0, tw]), modelpars,
-                                       self.moa, self.feedb, timeext=np.array([0.0, tw]))[:, -1]
-            for ep in endpoints:
-                si = self.ENDPOINT_STATE_IDX[ep]
-                control_val = control[si]
-                for x in X:
-                    target = x / 100.0
-                    mf_curve = np.full(window_starts.shape, np.nan)
-                    for iws, ts in enumerate(window_starts):
-                        def f(logMF, ts=ts, si=si, control_val=control_val, tw=tw, target=target):
-                            MF = 10 ** logMF
-                            effect = 1.0 - window_endpoint(MF, ts, tw, si) / control_val
-                            return effect - target
+        pool = mp.Pool(n_cores) if multicore else None
+        try:
+            for iw, tw in enumerate(Twin_arr):
+                if tw <= 0:
+                    continue
+                # window starts: a regular Tstep grid spanning from a window that
+                # just reaches the profile's first point (start = prof_start - tw)
+                # to one that starts exactly at the profile's last point
+                window_starts = np.arange(prof_start - tw, prof_end + 0.5 * Tstep, Tstep)
+                if prune_win:
+                    keep = self._prune_windows_mask(exposure_time, exposure_conc, window_starts, tw)
+                else:
+                    keep = np.ones(window_starts.shape, dtype=bool)
+                active_idx = np.where(keep)[0]
 
-                        mf_curve[iws] = self._bisect_log(f, mflow0, mfhigh0, max_expand, xtol,
-                                                          increasing=True)
+                # dense timeext: see the NOTE in calc_ecx_core.response
+                control = self.calc_model(np.zeros(2), np.array([0.0, tw]), modelpars,
+                                           self.moa, self.feedb,
+                                           timeext=np.linspace(0.0, tw, 50))[:, -1]
+                for ep in endpoints:
+                    si = self.ENDPOINT_STATE_IDX[ep]
+                    control_val = control[si]
+                    for x in X:
+                        target = x / 100.0
+                        mf_curve = np.full(window_starts.shape, np.nan)
 
-                    results[ep][x]['window_starts'][iw] = window_starts
-                    results[ep][x]['mf_curve'][iw] = mf_curve
-                    if np.any(np.isfinite(mf_curve)):
-                        worst_idx = np.nanargmin(mf_curve)
-                        results[ep][x]['value'][iw] = mf_curve[worst_idx]
-                        results[ep][x]['worst_time'][iw] = window_starts[worst_idx]
+                        if pool is not None:
+                            args = [(exposure_time, exposure_conc, window_starts[i], tw, si,
+                                      control_val, target, modelpars, mflow0, mfhigh0,
+                                      max_expand, xtol) for i in active_idx]
+                            vals = pool.starmap(self._epx_window_task, args)
+                            for i, v in zip(active_idx, vals):
+                                mf_curve[i] = v
+                        else:
+                            for i in active_idx:
+                                mf_curve[i] = self._epx_window_task(
+                                    exposure_time, exposure_conc, window_starts[i], tw, si,
+                                    control_val, target, modelpars, mflow0, mfhigh0,
+                                    max_expand, xtol)
+
+                        results[ep][x]['window_starts'][iw] = window_starts
+                        results[ep][x]['mf_curve'][iw] = mf_curve
+                        if np.any(np.isfinite(mf_curve)):
+                            worst_idx = np.nanargmin(mf_curve)
+                            results[ep][x]['value'][iw] = mf_curve[worst_idx]
+                            results[ep][x]['worst_time'][iw] = window_starts[worst_idx]
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+
         return results
 
     def worker_epx(self, pars, parvals, posfree, islog, dataset, exposure_time, exposure_conc,
-                   Twin, X, endpoints, Tstep, MF_bounds, max_expand, xtol):
+                   Twin, X, endpoints, Tstep, MF_bounds, max_expand, xtol, prune_win=False):
         """
         Worker function for EPx/LPx CI propagation: rebuilds a dataset-specific
         parameter vector from a free-parameter sample and runs calc_epx_core.
+        Always runs calc_epx_core with multicore=False: when this worker is
+        itself dispatched inside a multiprocessing.Pool (CI propagation
+        across parameter sets), a nested pool for the per-window loop is
+        not supported.
         """
         expanded = np.array(parvals, copy=True)
         expanded[posfree] = pars
         expanded = np.where(islog, 10 ** expanded, expanded)
         modelpars = self.build_dataset_parameters(expanded, dataset)
         return self.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin, X, endpoints,
-                                   Tstep, MF_bounds, max_expand, xtol)
+                                   Tstep, MF_bounds, max_expand, xtol,
+                                   prune_win=prune_win, multicore=False)
 
     # def worker_DEBresults(self,pars,parvals,posfree,concarray_i,
     #                       time,islog,moa,feedb,tevals):

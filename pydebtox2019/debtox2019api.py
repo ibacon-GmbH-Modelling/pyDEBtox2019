@@ -917,6 +917,7 @@ def calc_epx(
     MF_bounds=(1e-3, 1e3),
     max_expand=60,
     xtol=1e-8,
+    prune_win=False,
     ci=False,
     parspace=None,
     multicore=True,
@@ -978,13 +979,32 @@ def calc_epx(
         automatically expanded if it does not bracket the root.
     max_expand, xtol
         Passed to the bisection search (see DEBtox2019models.calc_epx_core).
+    prune_win : bool
+        If True, skip window positions that provably cannot be the worst
+        case before running any bisection on them (pyDEBtox2019 equivalent
+        of prune_windows.m from BYOM): a window whose maximum concentration
+        is below the largest *minimum* concentration found across all
+        windows cannot be the worst case, since some other window has
+        exposure at least as high everywhere. Their `mf_curve` entries stay
+        NaN. Can substantially cut runtime on long profiles, but - per the
+        original implementation - is not recommended when there is a
+        feedback on the elimination rate combined with an
+        assimilation/maintenance/growth mode of action (see
+        DEBtox2019models._prune_windows_mask).
     ci : bool
         If True, also propagate the 95% CI on the EPx/LPx estimates using
         parspace.propagationset (same mechanism as calc_ecx).
     parspace : PyParspace, optional
         Required when ci=True.
     multicore : bool
-        Use multiprocessing for the CI propagation.
+        Use all physical cores. For the main (point-estimate) calculation
+        this parallelizes the per-window bisections themselves (unlike
+        BYOM's MATLAB implementation, which stores the exposure scenario
+        in a global and therefore cannot parallelize across windows - see
+        DEBtox2019models._epx_window_task); for CI propagation (ci=True)
+        it parallelizes across the parameter sets in
+        parspace.propagationset instead (each of which then runs its
+        per-window loop serially, to avoid nested process pools).
     verbose : bool
         Print a summary table.
 
@@ -1025,7 +1045,8 @@ def calc_epx(
     modelpars = model.build_dataset_parameters(basepars, dataset)
 
     core = model.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin_arr, X,
-                                endpoint_codes, Tstep, MF_bounds, max_expand, xtol)
+                                endpoint_codes, Tstep, MF_bounds, max_expand, xtol,
+                                prune_win=prune_win, multicore=multicore)
 
     results = {}
     for ep in endpoint_codes:
@@ -1046,7 +1067,7 @@ def calc_epx(
         args = [
             (pars, model.parvals, parspace.posfree, model.islog, dataset,
              exposure_time, exposure_conc, Twin_arr, X, endpoint_codes,
-             Tstep, MF_bounds, max_expand, xtol)
+             Tstep, MF_bounds, max_expand, xtol, prune_win)
             for pars in parspace.propagationset
         ]
 

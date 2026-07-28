@@ -1,6 +1,7 @@
 # testing script for calc_epx with a realistic, high-resolution exposure profile
 
 import json
+import time
 import numpy as np
 import pandas as pd
 
@@ -61,10 +62,12 @@ if __name__ == "__main__":
     # (zero-padded there), so the sliding window also probes the initial
     # rise of the exposure, not only its (already zero-padded) tail-off.
     #
-    # Only X=50 and a single window length are used here to keep the runtime
-    # of this demo reasonable: with Tstep=1 on a full-year hourly profile,
-    # every (endpoint, X) combination already scans ~390 window positions,
-    # each requiring its own bisection on the multiplication factor.
+    # prune_win=True skips window positions that provably cannot be the
+    # worst case (pyDEBtox2019 equivalent of prune_windows.m) before running
+    # any bisection on them - safe here since feedbs are all off. Only X=50
+    # and a single window length are used to keep the runtime of this demo
+    # reasonable: with Tstep=1 on a full-year hourly profile, every
+    # (endpoint, X) combination scans ~390 window positions without pruning.
     res = dt2019.calc_epx(
         debmodeltest,
         epcl,
@@ -72,6 +75,7 @@ if __name__ == "__main__":
         X=[50],
         dataset=0,
         Tstep=1.0,
+        prune_win=True,
         verbose=True,
     )
 
@@ -103,7 +107,7 @@ if __name__ == "__main__":
     # a bare endpoint name or code is accepted (no need to wrap it in a list)
     res_single = dt2019.calc_epx(
         debmodeltest, epcl, Twin=21, X=[50],
-        endpoints='reproduction', dataset=0, Tstep=1.0, verbose=False,
+        endpoints='reproduction', dataset=0, Tstep=1.0, prune_win=True, verbose=False,
     )
     print("\nSingle endpoint by name ('reproduction'):")
     print(res_single)
@@ -117,6 +121,7 @@ if __name__ == "__main__":
         endpoints=['length', 'reproduction'],
         dataset=0,
         Tstep=1.0,
+        prune_win=True,
         verbose=True,
     )
     print("\nSubset endpoints ['length', 'reproduction']:")
@@ -139,6 +144,7 @@ if __name__ == "__main__":
         endpoints='reproduction',
         dataset=0,
         Tstep=1.0,
+        prune_win=True,
         ci=True,
         parspace=parspace,
         multicore=True,
@@ -146,3 +152,67 @@ if __name__ == "__main__":
     )
     print("\nCI results (reproduction):")
     print(res_ci['reproduction'])
+
+    # =========================================================================
+    # Parallelization (multicore) and window pruning: demonstrated on a
+    # SUBSET of the apple pond profile (first 180 days), so all four
+    # variants below can be run back to back in a reasonable time.
+    #
+    # - prune_win=True (pyDEBtox2019 equivalent of prune_windows.m): skips
+    #   window positions that provably cannot be the worst case before
+    #   running any bisection on them at all.
+    # - multicore=True: distributes the per-window bisections themselves
+    #   across worker processes (unlike BYOM's MATLAB implementation, which
+    #   cannot parallelize across windows because it stores the exposure
+    #   scenario in a global variable - our implementation has no such
+    #   shared/global state, so this works even though MATLAB's could not).
+    #
+    # All four variants must (and do) agree on the resulting EP50 and
+    # worst-case time; only the runtime differs.
+    # =========================================================================
+    subset_mask = profile_raw[:, 0] <= 180.0
+    etime_sub = profile_raw[subset_mask, 0]
+    econc_sub = profile_raw[subset_mask, 1]
+    print("\nSubset profile for parallel/pruning demo: %.0f days, %d points" % (
+        etime_sub[-1] - etime_sub[0], len(etime_sub)
+    ))
+
+    subset_kwargs = dict(
+        Twin=21, X=[50], endpoints='reproduction', dataset=0, Tstep=1.0, verbose=False,
+    )
+
+    t0 = time.time()
+    res_serial = dt2019.calc_epx(
+        debmodeltest, (etime_sub, econc_sub), multicore=False, prune_win=False, **subset_kwargs
+    )
+    print("serial,   no pruning : %6.2fs, EP50=%.6g at t=%.4g" % (
+        time.time() - t0, res_serial['reproduction'][50][0],
+        res_serial['reproduction']['50_worst_time'][0],
+    ))
+
+    t0 = time.time()
+    res_multi = dt2019.calc_epx(
+        debmodeltest, (etime_sub, econc_sub), multicore=True, prune_win=False, **subset_kwargs
+    )
+    print("multicore, no pruning: %6.2fs, EP50=%.6g at t=%.4g" % (
+        time.time() - t0, res_multi['reproduction'][50][0],
+        res_multi['reproduction']['50_worst_time'][0],
+    ))
+
+    t0 = time.time()
+    res_prune = dt2019.calc_epx(
+        debmodeltest, (etime_sub, econc_sub), multicore=False, prune_win=True, **subset_kwargs
+    )
+    print("serial,   pruned     : %6.2fs, EP50=%.6g at t=%.4g" % (
+        time.time() - t0, res_prune['reproduction'][50][0],
+        res_prune['reproduction']['50_worst_time'][0],
+    ))
+
+    t0 = time.time()
+    res_both = dt2019.calc_epx(
+        debmodeltest, (etime_sub, econc_sub), multicore=True, prune_win=True, **subset_kwargs
+    )
+    print("multicore, pruned    : %6.2fs, EP50=%.6g at t=%.4g" % (
+        time.time() - t0, res_both['reproduction'][50][0],
+        res_both['reproduction']['50_worst_time'][0],
+    ))
