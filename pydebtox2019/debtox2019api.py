@@ -747,6 +747,452 @@ def predict_exposure(
     return result
 
 
+def calc_ecx(
+    model,
+    Tend,
+    X=(10, 50),
+    endpoints=None,
+    dataset=0,
+    conc_bounds=None,
+    ci=False,
+    parspace=None,
+    multicore=True,
+    max_expand=60,
+    xtol=1e-8,
+    verbose=True,
+):
+    """
+    Calculate ECx / LCx values (effect concentrations) for constant exposure.
+
+    Emulates the functionality of calc_ecx.m from the DEBtox2019/BYOM toolbox:
+    for each evaluation time in `Tend` and each effect level in `X`, the
+    constant exposure concentration (applied from t=0 to that time) that
+    produces an X% effect relative to the untreated control is found by
+    bisection. Survival is interpreted as LCx (percentage additional
+    mortality); length and reproduction are interpreted as ECx (percentage
+    reduction relative to the control).
+
+    Parameters
+    ----------
+    model : DEBtox2019models
+        Model instance holding the (fitted) parameter vector (model.parvals).
+    Tend : float or array-like
+        Evaluation time(s), in the model's time unit.
+    X : iterable of float
+        Effect levels in percent, e.g. (10, 50) for EC10/EC50. Must be in [0, 100).
+    endpoints : {'survival', 'length', 'reproduction'}, int, or iterable thereof, optional
+        Endpoint(s) to evaluate; endpoints not requested are skipped entirely
+        (no bisection is run for them, saving computation time). A single
+        name/code (e.g. endpoints='reproduction') is accepted, as well as an
+        iterable of several. Defaults to those active for `dataset`
+        (model.active_endpoints[dataset]).
+    dataset : int
+        Dataset whose parameterization is used to run the model
+        (see model.build_dataset_parameters).
+    conc_bounds : tuple(float, float), optional
+        Initial (low, high) concentration bracket for the bisection search;
+        automatically expanded if it does not bracket the root. Defaults to
+        a bracket derived from the dataset's observed concentrations.
+    ci : bool
+        If True, also propagate the 95% CI on the ECx/LCx estimates using
+        parspace.propagationset (same mechanism as predict_exposure).
+    parspace : PyParspace, optional
+        Required when ci=True.
+    multicore : bool
+        Use multiprocessing for the CI propagation.
+    max_expand, xtol
+        Passed to the bisection search (see DEBtox2019models.calc_ecx_core).
+    verbose : bool
+        Print a summary table.
+
+    Returns
+    -------
+    dict
+        results['time']: evaluation times.
+        results[endpoint_name][x] -> np.ndarray of ECx/LCx values aligned with Tend.
+        If ci=True, also results[endpoint_name]['{x}_lo'] / '{x}_up'.
+    """
+    ENDPOINT_NAMES = {0: 'survival', 1: 'length', 2: 'reproduction'}
+    NAME_TO_CODE = {v: k for k, v in ENDPOINT_NAMES.items()}
+
+    Tend_arr = np.atleast_1d(np.asarray(Tend, dtype=float))
+    X = tuple(X)
+
+    if endpoints is None:
+        endpoint_codes = tuple(model.active_endpoints[dataset])
+    else:
+        if isinstance(endpoints, (str, int, np.integer)):
+            endpoints = (endpoints,)  # allow a single endpoint, e.g. endpoints='reproduction'
+        endpoint_codes = tuple(
+            ep if isinstance(ep, (int, np.integer)) else NAME_TO_CODE[ep]
+            for ep in endpoints
+        )
+
+    if conc_bounds is None:
+        concmax = model.concstruct_list[dataset].concmax
+        chigh = max(concmax.max() * 1e3, 1.0)
+        clow = max(concmax.max() * 1e-6, 1e-10)
+        conc_bounds = (clow, chigh)
+
+    basepars = model.parvals.copy()
+    basepars[model.islog] = 10 ** basepars[model.islog]
+    modelpars = model.build_dataset_parameters(basepars, dataset)
+
+    core = model.calc_ecx_core(modelpars, Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol)
+
+    results = {ENDPOINT_NAMES[ep]: core[ep] for ep in endpoint_codes}
+    results['time'] = Tend_arr
+
+    if ci:
+        if parspace is None:
+            raise ValueError("parspace must be supplied when ci=True")
+
+        args = [
+            (pars, model.parvals, parspace.posfree, model.islog, dataset,
+             Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol)
+            for pars in parspace.propagationset
+        ]
+
+        if multicore:
+            with mp.Pool(n_cores) as pool:
+                allruns = pool.starmap(model.worker_ecx, args)
+        else:
+            allruns = [model.worker_ecx(*arg) for arg in args]
+
+        for ep in endpoint_codes:
+            name = ENDPOINT_NAMES[ep]
+            for x in X:
+                stacked = np.vstack([run[ep][x] for run in allruns])
+                results[name]['%s_lo' % x] = np.nanmin(stacked, axis=0)
+                results[name]['%s_up' % x] = np.nanmax(stacked, axis=0)
+
+    if verbose:
+        for ep in endpoint_codes:
+            name = ENDPOINT_NAMES[ep]
+            label = 'LCx' if ep == 0 else 'ECx'
+            print(f"\n{label} for endpoint '{name}' (dataset {dataset}):")
+            header = "Time".ljust(10) + "".join(("%s%%" % x).ljust(14) for x in X)
+            print(header)
+            for it, t in enumerate(Tend_arr):
+                row = ("%.4g" % t).ljust(10)
+                for x in X:
+                    row += ("%.4g" % results[name][x][it]).ljust(14)
+                print(row)
+
+    return results
+
+
+def _resolve_exposure_profile(exposure):
+    """
+    Normalize an exposure-profile input to (time, concentration) 1D arrays.
+
+    Accepts either:
+    - a `concclass` instance (e.g. built with `focus=True` from a raw
+      time/concentration file) holding exactly one treatment/profile, so
+      the same object can also be used with `concclass.plot_exposure()` to
+      inspect the profile before/after calling calc_epx; or
+    - a (time, concentration) pair of array-likes.
+    """
+    if hasattr(exposure, 'concarraytr') and hasattr(exposure, 'timetr'):
+        if exposure.ntreats != 1:
+            raise ValueError(
+                "calc_epx expects a concclass instance with exactly one "
+                "treatment/profile (got ntreats=%d); split it first if it "
+                "holds several." % exposure.ntreats
+            )
+        return (np.asarray(exposure.timetr, dtype=float),
+                np.asarray(exposure.concarraytr[0], dtype=float))
+    exposure_time, exposure_conc = exposure
+    return np.asarray(exposure_time, dtype=float), np.asarray(exposure_conc, dtype=float)
+
+
+def calc_epx(
+    model,
+    exposure,
+    Twin,
+    X=(10, 50),
+    endpoints=None,
+    dataset=0,
+    Tstep=1.0,
+    MF_bounds=(1e-3, 1e3),
+    max_expand=60,
+    xtol=1e-8,
+    ci=False,
+    parspace=None,
+    multicore=True,
+    verbose=True,
+):
+    """
+    Calculate EPx / LPx values (exposure-profile multiplication factors).
+
+    Emulates the functionality of calc_epx.m from the DEBtox2019/BYOM
+    toolbox using the moving time window (MTW) method: a (typically long,
+    realistic) exposure profile is scanned with a sliding window of length
+    `Twin`, stepping the window start across the whole profile - including
+    starts before the profile's first time point and up to its last one -
+    zero-padding the head/tail whenever a window falls outside the
+    recorded profile. This lets a window probe both the initial rise of
+    the profile and its tail-off, in addition to the fully-covered middle.
+    For every window position, bisection finds the multiplication factor
+    (MF) that - applied to the whole profile - makes that single window
+    (run from a fresh, undamaged organism) reach exactly X% effect
+    relative to an unexposed control. The overall EPx/LPx is the minimum
+    of this per-window MF curve (the window that is easiest to push to X%
+    effect is the worst case), and the window start at that minimum is the
+    worst-case window time (see the `{x}_worst_time` / `{x}_curve` entries
+    in the returned dict, and plot_epx_results for visualizing them).
+    Survival is interpreted as LPx (percentage additional mortality);
+    length and reproduction are interpreted as EPx (percentage reduction
+    relative to the control).
+
+    Parameters
+    ----------
+    model : DEBtox2019models
+        Model instance holding the (fitted) parameter vector (model.parvals).
+    exposure : concclass or (time, concentration)
+        The exposure profile to be scaled and scanned. Either a `concclass`
+        instance with a single treatment (allowing e.g. `exposure.plot_exposure()`
+        to inspect the profile), or a plain (time, concentration) pair of
+        1D array-likes.
+    Twin : float or array-like
+        Time window length(s) over which the effect is evaluated, in the
+        model's time unit.
+    X : iterable of float
+        Effect levels in percent, e.g. (10, 50) for EP10/EP50. Must be in [0, 100).
+    endpoints : {'survival', 'length', 'reproduction'}, int, or iterable thereof, optional
+        Endpoint(s) to evaluate; endpoints not requested are skipped
+        entirely. Defaults to those active for `dataset`
+        (model.active_endpoints[dataset]).
+    dataset : int
+        Dataset whose parameterization is used to run the model
+        (see model.build_dataset_parameters).
+    Tstep : float
+        Step by which the window start is advanced. Window starts range
+        from one that just reaches the profile's first time point (so its
+        trailing part probes the initial rise of the profile) up to one
+        starting exactly at the profile's last time point (so its leading
+        part probes the profile's tail-off); both ends are zero-padded
+        where the window falls outside the recorded profile.
+    MF_bounds : tuple(float, float), optional
+        Initial (low, high) bracket for the multiplication-factor search;
+        automatically expanded if it does not bracket the root.
+    max_expand, xtol
+        Passed to the bisection search (see DEBtox2019models.calc_epx_core).
+    ci : bool
+        If True, also propagate the 95% CI on the EPx/LPx estimates using
+        parspace.propagationset (same mechanism as calc_ecx).
+    parspace : PyParspace, optional
+        Required when ci=True.
+    multicore : bool
+        Use multiprocessing for the CI propagation.
+    verbose : bool
+        Print a summary table.
+
+    Returns
+    -------
+    dict
+        results['window']: evaluation window lengths.
+        results[endpoint_name][x] -> np.ndarray of EPx/LPx values aligned with Twin.
+        results[endpoint_name]['{x}_worst_time'] -> np.ndarray (aligned with
+            Twin) of the window start time at which the worst-case (i.e.
+            minimal-MF) window was found.
+        results[endpoint_name]['{x}_curve'] -> list (aligned with Twin) of
+            (window_starts, mf_curve) tuples: the full per-window critical
+            multiplication-factor curve, e.g. for plotting with
+            plot_epx_results.
+        If ci=True, also results[endpoint_name]['{x}_lo'] / '{x}_up'
+        (CI bounds on the EPx/LPx value only).
+    """
+    ENDPOINT_NAMES = {0: 'survival', 1: 'length', 2: 'reproduction'}
+    NAME_TO_CODE = {v: k for k, v in ENDPOINT_NAMES.items()}
+
+    exposure_time, exposure_conc = _resolve_exposure_profile(exposure)
+    Twin_arr = np.atleast_1d(np.asarray(Twin, dtype=float))
+    X = tuple(X)
+
+    if endpoints is None:
+        endpoint_codes = tuple(model.active_endpoints[dataset])
+    else:
+        if isinstance(endpoints, (str, int, np.integer)):
+            endpoints = (endpoints,)  # allow a single endpoint, e.g. endpoints='reproduction'
+        endpoint_codes = tuple(
+            ep if isinstance(ep, (int, np.integer)) else NAME_TO_CODE[ep]
+            for ep in endpoints
+        )
+
+    basepars = model.parvals.copy()
+    basepars[model.islog] = 10 ** basepars[model.islog]
+    modelpars = model.build_dataset_parameters(basepars, dataset)
+
+    core = model.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin_arr, X,
+                                endpoint_codes, Tstep, MF_bounds, max_expand, xtol)
+
+    results = {}
+    for ep in endpoint_codes:
+        name = ENDPOINT_NAMES[ep]
+        results[name] = {}
+        for x in X:
+            results[name][x] = core[ep][x]['value']
+            results[name]['%s_worst_time' % x] = core[ep][x]['worst_time']
+            results[name]['%s_curve' % x] = list(
+                zip(core[ep][x]['window_starts'], core[ep][x]['mf_curve'])
+            )
+    results['window'] = Twin_arr
+
+    if ci:
+        if parspace is None:
+            raise ValueError("parspace must be supplied when ci=True")
+
+        args = [
+            (pars, model.parvals, parspace.posfree, model.islog, dataset,
+             exposure_time, exposure_conc, Twin_arr, X, endpoint_codes,
+             Tstep, MF_bounds, max_expand, xtol)
+            for pars in parspace.propagationset
+        ]
+
+        if multicore:
+            with mp.Pool(n_cores) as pool:
+                allruns = pool.starmap(model.worker_epx, args)
+        else:
+            allruns = [model.worker_epx(*arg) for arg in args]
+
+        for ep in endpoint_codes:
+            name = ENDPOINT_NAMES[ep]
+            for x in X:
+                stacked = np.vstack([run[ep][x]['value'] for run in allruns])
+                results[name]['%s_lo' % x] = np.nanmin(stacked, axis=0)
+                results[name]['%s_up' % x] = np.nanmax(stacked, axis=0)
+
+    if verbose:
+        for ep in endpoint_codes:
+            name = ENDPOINT_NAMES[ep]
+            label = 'LPx' if ep == 0 else 'EPx'
+            print(f"\n{label} for endpoint '{name}' (dataset {dataset}):")
+            header = "Window".ljust(10) + "".join(("%s%%" % x).ljust(14) for x in X)
+            print(header)
+            for iw, tw in enumerate(Twin_arr):
+                row = ("%.4g" % tw).ljust(10)
+                for x in X:
+                    row += ("%.4g" % results[name][x][iw]).ljust(14)
+                print(row)
+            worst_header = "Worst t".ljust(10) + "".join(("%s%%" % x).ljust(14) for x in X)
+            print(worst_header)
+            for iw, tw in enumerate(Twin_arr):
+                row = ("%.4g" % tw).ljust(10)
+                for x in X:
+                    row += ("%.4g" % results[name]['%s_worst_time' % x][iw]).ljust(14)
+                print(row)
+
+    return results
+
+
+def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_index=0,
+                      n_fine=300, figsize_mf=(7, 5), figsize_window=(11, 5)):
+    """
+    Produce the two diagnostic figures for a calc_epx result.
+
+    Figure 1 ("MF curve"): the per-window critical multiplication factor
+    (MF) as a function of the time-window start along the exposure
+    profile, with the worst-case (minimum, i.e. the EPx/LPx value) window
+    marked.
+
+    Figure 2 ("worst-case window"): for that worst-case window, the
+    EPx/LPx-scaled exposure profile on the left, and the endpoint
+    trajectory over the window compared to the unexposed control on the
+    right.
+
+    Parameters
+    ----------
+    model : DEBtox2019models
+        The same model instance passed to calc_epx.
+    exposure : concclass or (time, concentration)
+        The same exposure profile passed to calc_epx.
+    results : dict
+        The dict returned by calc_epx (must include the requested
+        endpoint/x, and must have been computed with this same
+        model/exposure/dataset).
+    endpoint : {'survival', 'length', 'reproduction'}
+    x : float
+        Effect level; must be one of the X values calc_epx was called with.
+    dataset : int
+        Dataset whose parameterization is used to re-run the model for the
+        smooth trajectory in Figure 2 (should match what calc_epx used).
+    twin_index : int
+        Index into the Twin array calc_epx was called with (0 for a single
+        window length).
+    n_fine : int
+        Number of points used to draw the smooth endpoint-vs-time curves
+        in Figure 2 (right panel).
+
+    Returns
+    -------
+    (fig_mf, fig_window) : the two matplotlib Figure objects.
+    """
+    ENDPOINT_STATE_IDX = {0: 3, 1: 1, 2: 2}
+    NAME_TO_CODE = {'survival': 0, 'length': 1, 'reproduction': 2}
+    ep_code = NAME_TO_CODE[endpoint]
+    si = ENDPOINT_STATE_IDX[ep_code]
+    label = 'LPx' if ep_code == 0 else 'EPx'
+
+    exposure_time, exposure_conc = _resolve_exposure_profile(exposure)
+
+    window_starts, mf_curve = results[endpoint]['%s_curve' % x][twin_index]
+    worst_time = results[endpoint]['%s_worst_time' % x][twin_index]
+    epx_value = results[endpoint][x][twin_index]
+    tw = results['window'][twin_index]
+
+    # --- Figure 1: per-window critical MF as a function of window start ---
+    fig_mf, ax_mf = plt.subplots(figsize=figsize_mf)
+    ax_mf.plot(window_starts, mf_curve, '-', color='tab:blue')
+    if np.isfinite(worst_time):
+        ax_mf.plot(worst_time, epx_value, 'o', color='tab:red',
+                   label='worst case (%s%s = %.4g)' % (label, x, epx_value))
+        ax_mf.legend()
+    ax_mf.set_yscale('log')
+    ax_mf.set_xlabel('Window start time')
+    ax_mf.set_ylabel('Critical multiplication factor')
+    ax_mf.set_title("%s%s vs. window start ('%s', Twin=%.4g)" % (label, x, endpoint, tw))
+    fig_mf.tight_layout()
+
+    # --- Figure 2: exposure and endpoint response for the worst-case window ---
+    fig_window, (ax_left, ax_right) = plt.subplots(1, 2, figsize=figsize_window)
+
+    if not np.isfinite(worst_time):
+        ax_left.set_title('No worst-case window found')
+        ax_right.set_title('No worst-case window found')
+        fig_window.tight_layout()
+        return fig_mf, fig_window
+
+    basepars = model.parvals.copy()
+    basepars[model.islog] = 10 ** basepars[model.islog]
+    modelpars = model.build_dataset_parameters(basepars, dataset)
+
+    t_list, c_list = model._window_profile(exposure_time, exposure_conc, worst_time, tw)
+
+    ax_left.plot(t_list, epx_value * c_list, color='tab:blue')
+    ax_left.fill_between(t_list, epx_value * c_list, color='tab:blue', alpha=0.2)
+    ax_left.set_xlabel('Time in window')
+    ax_left.set_ylabel('Exposure concentration (x %s%s)' % (label, x))
+    ax_left.set_title('Worst-case window exposure (start=%.4g)' % worst_time)
+
+    t_fine = np.linspace(0.0, tw, n_fine)
+    sol_worst = model.calc_model(epx_value * c_list, t_list, modelpars, model.moa, model.feedb,
+                                  timeext=t_fine)
+    sol_control = model.calc_model(np.zeros(2), np.array([0.0, tw]), modelpars, model.moa,
+                                    model.feedb, timeext=t_fine)
+
+    ax_right.plot(t_fine, sol_worst[si], color='tab:blue', label='Exposed (x %s%s)' % (label, x))
+    ax_right.plot(t_fine, sol_control[si], '--', color='tab:gray', label='Control')
+    ax_right.set_xlabel('Time in window')
+    ax_right.set_ylabel(endpoint.capitalize())
+    ax_right.set_title('%s in worst-case window vs. control' % endpoint.capitalize())
+    ax_right.legend()
+
+    fig_window.tight_layout()
+
+    return fig_mf, fig_window
+
+
 def build_dataset_variants(ccl, lcl, rcl, scl, control_type='both'):
     full_ds   = completedataset(concdata=ccl, lendata=lcl, reprodata=rcl, survdata=scl)
     # controls = by label value; your control values are 0 and/or 0.1 in the first row/headers

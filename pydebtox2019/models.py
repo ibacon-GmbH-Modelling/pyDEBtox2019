@@ -1,6 +1,7 @@
 import numpy as np
 from numba import jit
 from scipy.integrate import odeint,solve_ivp
+from scipy.optimize import brentq
 
 @jit(nopython=True)
 def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
@@ -456,6 +457,307 @@ class DEBtox2019models:
             # Assign only for exact matches
             modelsol[REPRO_STATE_IDX, idx_targets[match_targets]] = delayed_values[match_targets]
         return(modelsol)
+
+    # State index (row in the array returned by calc_model) that each endpoint
+    # code refers to. Endpoint codes follow the convention used throughout this
+    # class (see active_endpoints): 0=survival, 1=length, 2=reproduction.
+    ENDPOINT_STATE_IDX = {0: 3, 1: 1, 2: 2}
+
+    def _bisect_log(self, f, low, high, max_expand=60, xtol=1e-8, increasing=False):
+        """
+        Find the value (returned in linear scale) at which `f` (a function
+        of log10(value)) crosses zero, expanding the (low, high) bracket
+        geometrically (in log space) until a sign change is found or
+        `max_expand` expansions have been tried.
+
+        `increasing` indicates the expected sign of df/d(value): False for
+        a decreasing f (e.g. response falling with concentration, as in
+        calc_ecx_core), True for an increasing f (e.g. effect growing with
+        an exposure multiplication factor, as in calc_epx_core). This only
+        affects which side of the bracket gets expanded first; brentq
+        itself does not care about the direction.
+
+        Returns np.nan if no bracket could be found or the search fails.
+        """
+        loglow, loghigh = np.log10(low), np.log10(high)
+        flow, fhigh = f(loglow), f(loghigh)
+        if abs(flow) < 1e-12:
+            return 10 ** loglow
+        if abs(fhigh) < 1e-12:
+            return 10 ** loghigh
+        expand = 0
+        while flow * fhigh > 0 and expand < max_expand:
+            need_higher = (fhigh < 0) if increasing else (fhigh > 0)
+            if need_higher:
+                loghigh += 1.0
+                fhigh = f(loghigh)
+            else:
+                loglow -= 1.0
+                flow = f(loglow)
+            expand += 1
+        if not (np.isfinite(flow) and np.isfinite(fhigh)) or flow * fhigh > 0:
+            return np.nan
+        try:
+            root = brentq(f, loglow, loghigh, xtol=xtol)
+        except (ValueError, RuntimeError):
+            return np.nan
+        return 10 ** root
+
+    def calc_ecx_core(self, modelpars, Tend, X=(10, 50), endpoints=(0, 1, 2),
+                       conc_bounds=(1e-6, 1e6), max_expand=60, xtol=1e-8):
+        """
+        Core (numerical) ECx/LCx calculation for a single, fixed
+        dataset-specific parameter vector (as produced by
+        build_dataset_parameters). This is the pyDEBtox2019 equivalent of
+        calc_ecx.m from the DEBtox2019/BYOM toolbox: for every evaluation
+        time in `Tend` and every effect level in `X`, finds - by bisection
+        over a constant exposure concentration applied from t=0 to that
+        time - the concentration producing an X% effect relative to the
+        untreated (C=0) control, using the same parameter set.
+
+        Survival (endpoint 0) is treated as LCx (percentage additional
+        mortality); length and reproduction (endpoints 1, 2) are treated as
+        ECx (percentage reduction relative to the control).
+
+        Arguments:
+        - modelpars: dataset-specific DEB parameter vector (linear scale).
+        - Tend: array-like of evaluation times.
+        - X: iterable of effect levels in percent (0 <= x < 100).
+        - endpoints: iterable of endpoint codes (0=survival, 1=length, 2=reproduction).
+        - conc_bounds: initial (low, high) concentration bracket for the
+          bisection search; automatically expanded if needed.
+        - max_expand, xtol: passed to the bracket search / brentq.
+
+        Returns:
+        - dict: results[endpoint][x] -> np.ndarray aligned with Tend.
+        """
+        Tend_arr = np.atleast_1d(np.asarray(Tend, dtype=float))
+        clow0, chigh0 = conc_bounds
+
+        def response(C, t):
+            Cprofile = np.array([C, C])
+            tprofile = np.array([0.0, t])
+            sol = self.calc_model(Cprofile, tprofile, modelpars, self.moa, self.feedb,
+                                   timeext=np.array([0.0, t]))
+            return sol[:, -1]
+
+        results = {ep: {x: np.full(Tend_arr.shape, np.nan) for x in X} for ep in endpoints}
+
+        for it, t in enumerate(Tend_arr):
+            if t <= 0:
+                continue
+            control = response(0.0, t)
+            for ep in endpoints:
+                si = self.ENDPOINT_STATE_IDX[ep]
+                target_base = control[si]
+                for x in X:
+                    target = target_base * (1.0 - x / 100.0)
+
+                    def f(logC, si=si, target=target, t=t):
+                        return response(10 ** logC, t)[si] - target
+
+                    results[ep][x][it] = self._bisect_log(f, clow0, chigh0, max_expand, xtol,
+                                                           increasing=False)
+        return results
+
+    def worker_ecx(self, pars, parvals, posfree, islog, dataset, Tend, X, endpoints,
+                    conc_bounds, max_expand, xtol):
+        """
+        Worker function for ECx/LCx CI propagation: rebuilds a dataset-specific
+        parameter vector from a free-parameter sample and runs calc_ecx_core.
+        """
+        expanded = np.array(parvals, copy=True)
+        expanded[posfree] = pars
+        expanded = np.where(islog, 10 ** expanded, expanded)
+        modelpars = self.build_dataset_parameters(expanded, dataset)
+        return self.calc_ecx_core(modelpars, Tend, X, endpoints, conc_bounds, max_expand, xtol)
+
+    @staticmethod
+    def _window_profile(exposure_time, exposure_conc, t_start, Twin):
+        """
+        Build a (timextr, C) pair (as consumed by calc_model) representing
+        the exposure profile as seen through a window of length `Twin`
+        starting at `t_start`, shifted so that the window start maps to
+        t=0. Whenever the window extends before the first recorded profile
+        time point, or beyond the last one, the corresponding head/tail of
+        the window is zero-padded (no exposure is assumed to have occurred
+        before the profile starts, nor after it ends) - each transition is
+        represented as a two-point step (flat zero, then an instantaneous
+        jump to/from the profile's actual first/last value), rather than a
+        gradual ramp.
+        """
+        prof_start = exposure_time[0]
+        prof_end = exposure_time[-1]
+        t_end = t_start + Twin
+
+        if t_end <= prof_start or t_start >= prof_end:
+            # window entirely outside the profile's time range: no exposure at all
+            return np.array([0.0, Twin]), np.array([0.0, 0.0])
+
+        lo = max(t_start, prof_start)
+        hi = min(t_end, prof_end)
+        mask = (exposure_time > lo) & (exposure_time < hi)
+        inner_t = (exposure_time[mask] - t_start).tolist()
+        inner_c = exposure_conc[mask].tolist()
+
+        t_list = [0.0]
+        c_list = [0.0]
+        if t_start < prof_start:
+            # exposure is zero until the profile actually starts, then
+            # steps up to the profile's own initial value
+            head = prof_start - t_start
+            t_list += [head, head]
+            c_list += [0.0, exposure_conc[0]]
+        else:
+            c_list[0] = np.interp(t_start, exposure_time, exposure_conc)
+
+        t_list += inner_t
+        c_list += inner_c
+
+        if t_end > prof_end:
+            # exposure holds its last known value up to the profile's end,
+            # then steps down to zero for the remainder of the window
+            tail = prof_end - t_start
+            t_list += [tail, tail, Twin]
+            c_list += [exposure_conc[-1], 0.0, 0.0]
+        else:
+            t_list.append(Twin)
+            c_list.append(np.interp(t_end, exposure_time, exposure_conc))
+
+        return np.asarray(t_list), np.asarray(c_list)
+
+    def calc_epx_core(self, modelpars, exposure_time, exposure_conc, Twin,
+                       X=(10, 50), endpoints=(0, 1, 2), Tstep=1.0,
+                       MF_bounds=(1e-3, 1e3), max_expand=60, xtol=1e-8):
+        """
+        Core (numerical) EPx/LPx calculation for a single, fixed
+        dataset-specific parameter vector. This is the pyDEBtox2019
+        equivalent of calc_epx.m from the DEBtox2019/BYOM toolbox, using
+        the moving time window (MTW) method: for every window length in
+        `Twin`, a window of that length is slid in steps of `Tstep` across
+        the whole exposure profile - including window starts *before* the
+        profile's first time point (so the trailing part of the window
+        probes the initial rise of the profile) and up to a start at the
+        profile's very last time point. Whenever the window extends before
+        the first, or beyond the last, recorded profile time point, the
+        corresponding head/tail of the window is zero-padded (see
+        _window_profile).
+
+        For each window position, a per-window critical multiplication
+        factor is found by bisection: the value MF(t_start) that, applied
+        to the whole profile, makes the endpoint at the end of that single
+        window (run from a "fresh", undamaged organism) reach exactly X%
+        effect relative to an unexposed control run over the same
+        duration. Because effect increases monotonically with MF, the
+        overall EPx/LPx is the *minimum* of this per-window curve (the
+        window that is easiest to push to X% effect is the worst case),
+        and the window start at that minimum is the worst-case window
+        time. This is mathematically equivalent to (and no more expensive
+        than) first finding, for a trial MF, the worst effect over all
+        windows and then bisecting on MF - but it additionally yields the
+        full per-window MF(t_start) curve as a natural by-product, useful
+        for diagnostics/plotting.
+
+        Survival (endpoint 0) yields LPx (lethal profile factor); length
+        and reproduction (endpoints 1, 2) yield EPx (effect profile
+        factor).
+
+        Arguments:
+        - modelpars: dataset-specific DEB parameter vector (linear scale).
+        - exposure_time, exposure_conc: 1D arrays describing the (long)
+          exposure profile to be scaled and scanned.
+        - Twin: array-like of window lengths.
+        - X: iterable of effect levels in percent (0 <= x < 100).
+        - endpoints: iterable of endpoint codes (0=survival, 1=length, 2=reproduction).
+        - Tstep: step by which the window start is advanced across the
+          (head-to-tail extended) profile range.
+        - MF_bounds: initial (low, high) bracket for the multiplication
+          factor search; automatically expanded if needed.
+        - max_expand, xtol: passed to the bracket search / brentq.
+
+        Returns:
+        - dict: results[endpoint][x] -> dict with:
+            'value': np.ndarray aligned with Twin - the EPx/LPx (minimum
+                     of the per-window critical MF curve).
+            'worst_time': np.ndarray aligned with Twin - the window start
+                     time at which that minimum was found (NaN if no
+                     window could reach the target effect within MF_bounds).
+            'window_starts': list (one array per Twin entry) of the window
+                     start times that were scanned.
+            'mf_curve': list (one array per Twin entry) of the per-window
+                     critical MF at each of those window starts (NaN where
+                     that window alone could not reach the target effect).
+        """
+        exposure_time = np.asarray(exposure_time, dtype=float)
+        exposure_conc = np.asarray(exposure_conc, dtype=float)
+        Twin_arr = np.atleast_1d(np.asarray(Twin, dtype=float))
+        prof_start = exposure_time[0]
+        prof_end = exposure_time[-1]
+        mflow0, mfhigh0 = MF_bounds
+
+        def window_endpoint(MF, ts, tw, si):
+            t_list, c_list = self._window_profile(exposure_time, exposure_conc, ts, tw)
+            sol = self.calc_model(MF * c_list, t_list, modelpars, self.moa, self.feedb,
+                                   timeext=np.array([0.0, tw]))
+            return sol[si, -1]
+
+        results = {
+            ep: {
+                x: {
+                    'value': np.full(Twin_arr.shape, np.nan),
+                    'worst_time': np.full(Twin_arr.shape, np.nan),
+                    'window_starts': [None] * len(Twin_arr),
+                    'mf_curve': [None] * len(Twin_arr),
+                }
+                for x in X
+            }
+            for ep in endpoints
+        }
+
+        for iw, tw in enumerate(Twin_arr):
+            if tw <= 0:
+                continue
+            # window starts: a regular Tstep grid spanning from a window that
+            # just reaches the profile's first point (start = prof_start - tw)
+            # to one that starts exactly at the profile's last point
+            window_starts = np.arange(prof_start - tw, prof_end + 0.5 * Tstep, Tstep)
+            control = self.calc_model(np.zeros(2), np.array([0.0, tw]), modelpars,
+                                       self.moa, self.feedb, timeext=np.array([0.0, tw]))[:, -1]
+            for ep in endpoints:
+                si = self.ENDPOINT_STATE_IDX[ep]
+                control_val = control[si]
+                for x in X:
+                    target = x / 100.0
+                    mf_curve = np.full(window_starts.shape, np.nan)
+                    for iws, ts in enumerate(window_starts):
+                        def f(logMF, ts=ts, si=si, control_val=control_val, tw=tw, target=target):
+                            MF = 10 ** logMF
+                            effect = 1.0 - window_endpoint(MF, ts, tw, si) / control_val
+                            return effect - target
+
+                        mf_curve[iws] = self._bisect_log(f, mflow0, mfhigh0, max_expand, xtol,
+                                                          increasing=True)
+
+                    results[ep][x]['window_starts'][iw] = window_starts
+                    results[ep][x]['mf_curve'][iw] = mf_curve
+                    if np.any(np.isfinite(mf_curve)):
+                        worst_idx = np.nanargmin(mf_curve)
+                        results[ep][x]['value'][iw] = mf_curve[worst_idx]
+                        results[ep][x]['worst_time'][iw] = window_starts[worst_idx]
+        return results
+
+    def worker_epx(self, pars, parvals, posfree, islog, dataset, exposure_time, exposure_conc,
+                   Twin, X, endpoints, Tstep, MF_bounds, max_expand, xtol):
+        """
+        Worker function for EPx/LPx CI propagation: rebuilds a dataset-specific
+        parameter vector from a free-parameter sample and runs calc_epx_core.
+        """
+        expanded = np.array(parvals, copy=True)
+        expanded[posfree] = pars
+        expanded = np.where(islog, 10 ** expanded, expanded)
+        modelpars = self.build_dataset_parameters(expanded, dataset)
+        return self.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin, X, endpoints,
+                                   Tstep, MF_bounds, max_expand, xtol)
 
     # def worker_DEBresults(self,pars,parvals,posfree,concarray_i,
     #                       time,islog,moa,feedb,tevals):
