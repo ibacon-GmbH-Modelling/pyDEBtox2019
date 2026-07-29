@@ -475,8 +475,8 @@ class reproclass(dataclass):
             self.makerepro_ind(optcase)
         elif reprocase == "group":
             self.makerepro_grp()
-        elif reprocase == "sex":
-            self.makerepro_sex()
+        # elif reprocase == "sex":
+        #     self.makerepro_sex()
         for i in range(self.ntreats):
             tmprepro = self.dataarray_cumulative[i, np.isnan(self.dataarray_cumulative[i])==False]
             self.reprocumtreat.append(tmprepro)
@@ -681,8 +681,6 @@ class reproclass(dataclass):
     def makerepro_grp(self):
         pass
 
-    def makerepro_sex(self):
-        pass
 
     def plot_data(self, dataarray=None, label="Individual reproduction", wmeans=False):
         return super().plot_data(dataarray=dataarray, label=label,wmeans=wmeans)

@@ -759,6 +759,7 @@ def calc_ecx(
     multicore=True,
     max_expand=60,
     xtol=1e-8,
+    plateau_tol=1e-6,
     verbose=True,
 ):
     """
@@ -802,6 +803,15 @@ def calc_ecx(
         Use multiprocessing for the CI propagation.
     max_expand, xtol
         Passed to the bisection search (see DEBtox2019models.calc_ecx_core).
+    plateau_tol : float or None
+        Some endpoints can plateau before reaching a requested effect level
+        (e.g. body length has a hard floor - growth cannot shrink below
+        half the starting length - so at high enough concentration the
+        effect on length stops increasing). Once the effect changes by less
+        than `plateau_tol` between two successive concentration-bracket
+        expansion steps, the search for that (endpoint, x, time) gives up
+        early (NaN) instead of always exhausting `max_expand`. Set to None
+        to disable and always use the full `max_expand` budget.
     verbose : bool
         Print a summary table.
 
@@ -838,7 +848,8 @@ def calc_ecx(
     basepars[model.islog] = 10 ** basepars[model.islog]
     modelpars = model.build_dataset_parameters(basepars, dataset)
 
-    core = model.calc_ecx_core(modelpars, Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol)
+    core = model.calc_ecx_core(modelpars, Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol,
+                                plateau_tol=plateau_tol)
 
     results = {ENDPOINT_NAMES[ep]: core[ep] for ep in endpoint_codes}
     results['time'] = Tend_arr
@@ -849,7 +860,7 @@ def calc_ecx(
 
         args = [
             (pars, model.parvals, parspace.posfree, model.islog, dataset,
-             Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol)
+             Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol, plateau_tol)
             for pars in parspace.propagationset
         ]
 
@@ -878,6 +889,159 @@ def calc_ecx(
                 for x in X:
                     row += ("%.4g" % results[name][x][it]).ljust(14)
                 print(row)
+
+    return results
+
+
+def calc_dose_response(
+    model,
+    Tend,
+    endpoints=None,
+    dataset=0,
+    x_values=None,
+    n_points=49,
+    conc_bounds=None,
+    max_expand=60,
+    xtol=1e-8,
+    plateau_tol=1e-6,
+    ci=False,
+    parspace=None,
+    multicore=True,
+    plot=True,
+    verbose=False,
+    figsize=None,
+):
+    """
+    Calculate (and, by default, plot) a dose-response curve for one or more
+    endpoints, at a single fixed exposure duration.
+
+    This is built directly on top of calc_ecx: instead of a handful of
+    named effect levels (e.g. EC10/EC50), it computes ECx/LCx over a fine
+    grid of effect levels spanning 1% to 99% effect (by default). Each
+    resulting (x, ECx) pair is then reframed as a point on the classical
+    dose-response curve: concentration = ECx(x) on the x-axis, response =
+    (100 - x)% of the unexposed control on the y-axis. Connecting these
+    points (in increasing concentration) traces out the usual sigmoid
+    response-vs-concentration curve. If more than one endpoint is
+    requested, one subplot is drawn per endpoint.
+
+    Parameters
+    ----------
+    model : DEBtox2019models
+        Model instance holding the (fitted) parameter vector (model.parvals).
+    Tend : float
+        The single exposure duration at which the dose-response curve is
+        evaluated (in the model's time unit).
+    endpoints : {'survival', 'length', 'reproduction'}, int, or iterable thereof, optional
+        Endpoint(s) to compute/plot. Defaults to those active for `dataset`
+        (model.active_endpoints[dataset]).
+    dataset : int
+        Dataset whose parameterization is used to run the model.
+    x_values : array-like of float, optional
+        Effect levels (in percent, 0 < x < 100) to evaluate. Defaults to
+        `n_points` values evenly spaced between 1% and 99%. Overrides
+        `n_points` when given.
+    n_points : int
+        Number of effect levels between 1% and 99% (inclusive) used to
+        build `x_values` when it is not given directly.
+    conc_bounds, max_expand, xtol
+        Passed through to calc_ecx (see there for details).
+    plateau_tol : float or None
+        Passed through to calc_ecx. Some endpoints plateau before reaching
+        high effect levels (e.g. body length has a hard floor - growth
+        cannot shrink below half the starting length - so no concentration
+        reaches, say, 99% effect on length). Rather than exhausting the
+        full concentration-bracket expansion budget for every such x, the
+        search for a given (endpoint, x) gives up early (NaN, correctly
+        excluded from the plotted curve) once the effect stops changing
+        appreciably as concentration keeps increasing. Set to None to
+        disable and always use the full max_expand budget.
+    ci : bool
+        If True, also compute (and, if plot=True, shade) the 95% CI band
+        on the concentration axis, using parspace.propagationset (same
+        mechanism as calc_ecx).
+    parspace : PyParspace, optional
+        Required when ci=True.
+    multicore : bool
+        Use multiprocessing for the CI propagation (passed to calc_ecx).
+    plot : bool
+        Produce the dose-response figure (one subplot per endpoint).
+    verbose : bool
+        Passed through to calc_ecx; left False by default here since a
+        per-effect-level table with `n_points` columns is impractically
+        wide to print.
+    figsize : tuple, optional
+        Figure size; defaults to (6 * n_endpoints, 5).
+
+    Returns
+    -------
+    dict
+        results[endpoint_name] -> dict with:
+            'x': the effect levels used (percent, ascending),
+            'conc': the corresponding ECx/LCx concentrations,
+            'response': 100 - x (percent of the unexposed control),
+        plus 'conc_lo' / 'conc_up' (CI bounds on the concentration) if
+        ci=True. If plot=True, also results['figure'].
+    """
+    if x_values is None:
+        x_values = np.linspace(1.0, 99.0, n_points)
+    else:
+        x_values = np.asarray(x_values, dtype=float)
+
+    Tend_val = float(Tend)  # a dose-response curve is defined at one fixed duration
+
+    ecx_results = calc_ecx(
+        model, Tend_val, X=x_values, endpoints=endpoints, dataset=dataset,
+        conc_bounds=conc_bounds, ci=ci, parspace=parspace, multicore=multicore,
+        max_expand=max_expand, xtol=xtol, plateau_tol=plateau_tol, verbose=verbose,
+    )
+
+    endpoint_names = [name for name in ecx_results.keys() if name != 'time']
+
+    results = {}
+    for name in endpoint_names:
+        conc = np.array([ecx_results[name][x][0] for x in x_values])
+        entry = {
+            'x': x_values,
+            'conc': conc,
+            'response': 100.0 - x_values,
+        }
+        if ci:
+            entry['conc_lo'] = np.array([ecx_results[name]['%s_lo' % x][0] for x in x_values])
+            entry['conc_up'] = np.array([ecx_results[name]['%s_up' % x][0] for x in x_values])
+        results[name] = entry
+
+    if plot:
+        n = len(endpoint_names)
+        if figsize is None:
+            figsize = (6 * n, 5)
+        fig, axes = plt.subplots(1, n, figsize=figsize, squeeze=False)
+        axes = axes[0]
+
+        for ax, name in zip(axes, endpoint_names):
+            entry = results[name]
+            order = np.argsort(entry['conc'])
+            conc_sorted = entry['conc'][order]
+            resp_sorted = entry['response'][order]
+            valid = np.isfinite(conc_sorted)
+
+            ax.plot(conc_sorted[valid], resp_sorted[valid], '-o', ms=3, color='tab:blue')
+
+            if ci:
+                lo_sorted = entry['conc_lo'][order]
+                up_sorted = entry['conc_up'][order]
+                valid_ci = valid & np.isfinite(lo_sorted) & np.isfinite(up_sorted)
+                ax.fill_betweenx(resp_sorted[valid_ci], lo_sorted[valid_ci], up_sorted[valid_ci],
+                                  color='tab:blue', alpha=0.2)
+
+            ax.set_xscale('log')
+            ax.set_xlabel('Concentration')
+            ax.set_ylabel('Response (% of control)')
+            ax.set_ylim(0, 105)
+            ax.set_title("%s (t=%.4g)" % (name, Tend_val))
+
+        fig.tight_layout()
+        results['figure'] = fig
 
     return results
 
@@ -917,6 +1081,7 @@ def calc_epx(
     MF_bounds=(1e-3, 1e3),
     max_expand=60,
     xtol=1e-8,
+    plateau_tol=1e-6,
     prune_win=False,
     ci=False,
     parspace=None,
@@ -979,6 +1144,13 @@ def calc_epx(
         automatically expanded if it does not bracket the root.
     max_expand, xtol
         Passed to the bisection search (see DEBtox2019models.calc_epx_core).
+    plateau_tol : float or None
+        Some endpoints can plateau before reaching a requested effect level
+        (e.g. body length has a hard floor - growth cannot shrink below
+        half the starting length). Once the effect changes by less than
+        `plateau_tol` between two successive multiplication-factor bracket
+        expansion steps, that window's search gives up early (NaN) instead
+        of always exhausting `max_expand`. Set to None to disable.
     prune_win : bool
         If True, skip window positions that provably cannot be the worst
         case before running any bisection on them (pyDEBtox2019 equivalent
@@ -1046,7 +1218,8 @@ def calc_epx(
 
     core = model.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin_arr, X,
                                 endpoint_codes, Tstep, MF_bounds, max_expand, xtol,
-                                prune_win=prune_win, multicore=multicore)
+                                prune_win=prune_win, multicore=multicore,
+                                plateau_tol=plateau_tol)
 
     results = {}
     for ep in endpoint_codes:
@@ -1067,7 +1240,7 @@ def calc_epx(
         args = [
             (pars, model.parvals, parspace.posfree, model.islog, dataset,
              exposure_time, exposure_conc, Twin_arr, X, endpoint_codes,
-             Tstep, MF_bounds, max_expand, xtol, prune_win)
+             Tstep, MF_bounds, max_expand, xtol, prune_win, plateau_tol)
             for pars in parspace.propagationset
         ]
 

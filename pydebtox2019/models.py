@@ -466,7 +466,8 @@ class DEBtox2019models:
     # class (see active_endpoints): 0=survival, 1=length, 2=reproduction.
     ENDPOINT_STATE_IDX = {0: 3, 1: 1, 2: 2}
 
-    def _bisect_log(self, f, low, high, max_expand=60, xtol=1e-8, increasing=False):
+    def _bisect_log(self, f, low, high, max_expand=60, xtol=1e-8, increasing=False,
+                     plateau_tol=1e-6):
         """
         Find the value (returned in linear scale) at which `f` (a function
         of log10(value)) crosses zero, expanding the (low, high) bracket
@@ -479,6 +480,19 @@ class DEBtox2019models:
         an exposure multiplication factor, as in calc_epx_core). This only
         affects which side of the bracket gets expanded first; brentq
         itself does not care about the direction.
+
+        `plateau_tol`: some endpoints can plateau well before reaching a
+        requested effect level - e.g. body length has a hard floor in the
+        model (growth is not allowed to shrink below half the starting
+        length), so at high enough concentration the effect on length stops
+        increasing at all, and no concentration will ever reach, say, 99%
+        effect. Without a check, each expansion step keeps multiplying the
+        bracket by 10x anyway, burning through the full `max_expand` budget
+        before giving up. Instead, after each expansion step, if `f` has
+        changed by less than `plateau_tol` from the previous step (and no
+        sign change has been found), the search concludes the underlying
+        response has plateaued and stops early, returning NaN. Set to None
+        to disable this check and always use the full `max_expand` budget.
 
         Returns np.nan if no bracket could be found or the search fails.
         """
@@ -493,10 +507,14 @@ class DEBtox2019models:
             need_higher = (fhigh < 0) if increasing else (fhigh > 0)
             if need_higher:
                 loghigh += 1.0
-                fhigh = f(loghigh)
+                f_prev, fhigh = fhigh, f(loghigh)
+                if plateau_tol is not None and abs(fhigh - f_prev) < plateau_tol:
+                    return np.nan
             else:
                 loglow -= 1.0
-                flow = f(loglow)
+                f_prev, flow = flow, f(loglow)
+                if plateau_tol is not None and abs(flow - f_prev) < plateau_tol:
+                    return np.nan
             expand += 1
         if not (np.isfinite(flow) and np.isfinite(fhigh)) or flow * fhigh > 0:
             return np.nan
@@ -507,7 +525,8 @@ class DEBtox2019models:
         return 10 ** root
 
     def calc_ecx_core(self, modelpars, Tend, X=(10, 50), endpoints=(0, 1, 2),
-                       conc_bounds=(1e-6, 1e6), max_expand=60, xtol=1e-8):
+                       conc_bounds=(1e-6, 1e6), max_expand=60, xtol=1e-8,
+                       plateau_tol=1e-6):
         """
         Core (numerical) ECx/LCx calculation for a single, fixed
         dataset-specific parameter vector (as produced by
@@ -530,6 +549,10 @@ class DEBtox2019models:
         - conc_bounds: initial (low, high) concentration bracket for the
           bisection search; automatically expanded if needed.
         - max_expand, xtol: passed to the bracket search / brentq.
+        - plateau_tol: passed to the bracket search (see _bisect_log);
+          stops expanding early (returning NaN) once the response has
+          visibly plateaued (e.g. length hitting its shrink floor) rather
+          than always exhausting max_expand. Set to None to disable.
 
         Returns:
         - dict: results[endpoint][x] -> np.ndarray aligned with Tend.
@@ -568,11 +591,12 @@ class DEBtox2019models:
                         return response(10 ** logC, t)[si] - target
 
                     results[ep][x][it] = self._bisect_log(f, clow0, chigh0, max_expand, xtol,
-                                                           increasing=False)
+                                                           increasing=False,
+                                                           plateau_tol=plateau_tol)
         return results
 
     def worker_ecx(self, pars, parvals, posfree, islog, dataset, Tend, X, endpoints,
-                    conc_bounds, max_expand, xtol):
+                    conc_bounds, max_expand, xtol, plateau_tol=1e-6):
         """
         Worker function for ECx/LCx CI propagation: rebuilds a dataset-specific
         parameter vector from a free-parameter sample and runs calc_ecx_core.
@@ -581,7 +605,8 @@ class DEBtox2019models:
         expanded[posfree] = pars
         expanded = np.where(islog, 10 ** expanded, expanded)
         modelpars = self.build_dataset_parameters(expanded, dataset)
-        return self.calc_ecx_core(modelpars, Tend, X, endpoints, conc_bounds, max_expand, xtol)
+        return self.calc_ecx_core(modelpars, Tend, X, endpoints, conc_bounds, max_expand, xtol,
+                                   plateau_tol=plateau_tol)
 
     @staticmethod
     def _window_profile(exposure_time, exposure_conc, t_start, Twin):
@@ -669,7 +694,7 @@ class DEBtox2019models:
         return maxs >= maxmin
 
     def _epx_window_task(self, exposure_time, exposure_conc, ts, tw, si, control_val, target,
-                          modelpars, mflow0, mfhigh0, max_expand, xtol):
+                          modelpars, mflow0, mfhigh0, max_expand, xtol, plateau_tol=1e-6):
         """
         Compute the critical multiplication factor for a single moving-
         time-window position. This is the unit of work dispatched to
@@ -691,12 +716,13 @@ class DEBtox2019models:
             effect = 1.0 - sol[si, -1] / control_val
             return effect - target
 
-        return self._bisect_log(f, mflow0, mfhigh0, max_expand, xtol, increasing=True)
+        return self._bisect_log(f, mflow0, mfhigh0, max_expand, xtol, increasing=True,
+                                 plateau_tol=plateau_tol)
 
     def calc_epx_core(self, modelpars, exposure_time, exposure_conc, Twin,
                        X=(10, 50), endpoints=(0, 1, 2), Tstep=1.0,
                        MF_bounds=(1e-3, 1e3), max_expand=60, xtol=1e-8,
-                       prune_win=False, multicore=False):
+                       prune_win=False, multicore=False, plateau_tol=1e-6):
         """
         Core (numerical) EPx/LPx calculation for a single, fixed
         dataset-specific parameter vector. This is the pyDEBtox2019
@@ -752,6 +778,10 @@ class DEBtox2019models:
           run inside a worker process (e.g. from worker_epx during CI
           propagation with multicore Pool) - nested pools are not
           supported by Python's multiprocessing.
+        - plateau_tol: passed to the bracket search (see _bisect_log);
+          stops expanding a window's MF search early (NaN) once the effect
+          has visibly plateaued (e.g. length hitting its shrink floor)
+          rather than always exhausting max_expand. Set to None to disable.
 
         Returns:
         - dict: results[endpoint][x] -> dict with:
@@ -816,7 +846,7 @@ class DEBtox2019models:
                         if pool is not None:
                             args = [(exposure_time, exposure_conc, window_starts[i], tw, si,
                                       control_val, target, modelpars, mflow0, mfhigh0,
-                                      max_expand, xtol) for i in active_idx]
+                                      max_expand, xtol, plateau_tol) for i in active_idx]
                             vals = pool.starmap(self._epx_window_task, args)
                             for i, v in zip(active_idx, vals):
                                 mf_curve[i] = v
@@ -825,7 +855,7 @@ class DEBtox2019models:
                                 mf_curve[i] = self._epx_window_task(
                                     exposure_time, exposure_conc, window_starts[i], tw, si,
                                     control_val, target, modelpars, mflow0, mfhigh0,
-                                    max_expand, xtol)
+                                    max_expand, xtol, plateau_tol)
 
                         results[ep][x]['window_starts'][iw] = window_starts
                         results[ep][x]['mf_curve'][iw] = mf_curve
@@ -841,7 +871,8 @@ class DEBtox2019models:
         return results
 
     def worker_epx(self, pars, parvals, posfree, islog, dataset, exposure_time, exposure_conc,
-                   Twin, X, endpoints, Tstep, MF_bounds, max_expand, xtol, prune_win=False):
+                   Twin, X, endpoints, Tstep, MF_bounds, max_expand, xtol, prune_win=False,
+                   plateau_tol=1e-6):
         """
         Worker function for EPx/LPx CI propagation: rebuilds a dataset-specific
         parameter vector from a free-parameter sample and runs calc_epx_core.
@@ -856,7 +887,8 @@ class DEBtox2019models:
         modelpars = self.build_dataset_parameters(expanded, dataset)
         return self.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin, X, endpoints,
                                    Tstep, MF_bounds, max_expand, xtol,
-                                   prune_win=prune_win, multicore=False)
+                                   prune_win=prune_win, multicore=False,
+                                   plateau_tol=plateau_tol)
 
     # def worker_DEBresults(self,pars,parvals,posfree,concarray_i,
     #                       time,islog,moa,feedb,tevals):
@@ -984,88 +1016,6 @@ class DEBtox2019models:
             feedb,
             tevals
         ).T
-
-
-    # def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
-    #     # somewhere here need to implement also the Tbp part
-    #     if self.Tbp > 0:
-    #         # apply a time delay for the reproduction
-    #         # tbp = timeext + self.Tbp
-    #         tbp = timeext[timeext>self.Tbp] - self.Tbp
-    #         newtime = np.unique(np.concatenate((timeext,tbp)))
-    #         modelsol = calc_DEBresults(C, timextr, DEBpars, moa, feedb, newtime, solver=self.solver)
-    #         mask = np.isin(newtime,tbp)
-    #         indices = np.nonzero(mask)[0]
-    #         modelsol_tbp = np.copy(modelsol[2,indices])
-    #         # print("model_tbp before delay: ", modelsol_tbp)
-    #         modelsol[2,:] = 0
-    #         mask2 = np.isin(newtime,timeext)
-    #         indices2 = np.nonzero(mask2)[0]
-    #         modelsol = modelsol[:,indices2]
-    #         mask3 = np.isin(timeext,tbp+self.Tbp)
-    #         indices3 = np.nonzero(mask3)[0]
-    #         # print("indices with Tbp: ", len(indices3))
-    #         # print("modelsol_tbp at those indices: ", len(modelsol_tbp))
-    #         modelsol[2,indices3] = modelsol_tbp
-    #     else:
-    #         modelsol = calc_DEBresults(C, timextr, DEBpars, moa, feedb, timeext, solver=self.solver)
-    #     return(modelsol)
-
-    # def log_likelihood_wrong(self, theta, DEBallpars, posfree):
-    #     # fallback function that separates the likelihood calculation for each
-    #     # treatment and summs the contriubtions
-    #     # The reason this is wrong is that the treatments might not be
-    #     # independent and therefore the loglikelihood cannot be summed
-    #     '''
-    #     Calculate the log-likelihood of the GUTS model.
-
-    #     Arguments:
-    #     - theta: vector of free parameter values
-    #     - DEBallpars: vector of all parameter values
-    #     - posfree: indices of the free parameters in the parameter vector
-    #     '''
-    #     DEBallpars[posfree] = theta
-    #     # TODO: make sure that for each dataset the respective hb value is correctly passed
-    #     modelpars = 10**DEBallpars*self.islog + DEBallpars*(1-self.islog)
-    #     llik = 0
-    #     for nd in range(self.ndatasets):  # iterate over datasets
-    #         for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
-    #             try:
-    #                 modelsol = self.calc_model(self.concstruct_list[nd].concarray[i], self.concstruct_list[nd].time,
-    #                        modelpars, self.moa, self.feedb,
-    #                        self.timeext[nd])
-    #             except:
-    #                 # there was a problem with the ODE solver
-    #                 return(np.inf)
-    #             for endpoint in self.active_endpoints[nd]:
-    #                 if endpoint == 0:
-    #                     llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
-    #                                                     self.survstruct_list[nd].deatharraytreat[i])
-    #                     print("llsurv treatment ", i)
-    #                     print(llsurv)
-    #                     llik += llsurv
-    #                 elif (endpoint == 1):  # length
-    #                     lengthtreat = self.lengthstruct_list[nd].flatdataclean[i]
-    #                     weights = self.lengthstruct_list[nd].flatweightsclean[i]
-    #                     commontime =  np.array([self.indexcommon_length[nd][j] for j in range(len(self.indexcommon_length[nd])) if self.lengthstruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-    #                     modelvector = np.tile(modelsol[1, :][commontime[0]],len(commontime))[self.lengthstruct_list[nd].indfintable[i]]
-    #                     transf = self.lengthstruct_list[nd].statstype
-    #                     lllength = scaled_loglikelihood(modelvector, lengthtreat, weights, transf)
-    #                     print("lllength treatment ", i)
-    #                     print(lllength)
-    #                     llik += lllength
-    #                 elif (endpoint == 2):  # reproduction
-    #                     reprotreat = self.reprostruct_list[nd].flatdataclean[i]
-    #                     weights = self.reprostruct_list[nd].flatweightsclean[i]
-    #                     commontime =  np.array([self.indexcommon_repro[nd][j] for j in range(len(self.indexcommon_repro[nd])) if self.reprostruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-    #                     modelvector = np.tile(modelsol[2, :][commontime[0]],len(commontime))[self.reprostruct_list[nd].indfintable[i]]
-    #                     transf = self.reprostruct_list[nd].statstype
-    #                     llrepro = scaled_loglikelihood(modelvector, reprotreat, weights, transf)
-    #                     print("llrepro treatment ", i)
-    #                     print(llrepro)
-    #                     llik += llrepro
-    #     print("Total llk: ", -llik)
-    #     return(-llik)
     
     # new version with all the treatments together
     def log_likelihood(self, theta, DEBallpars, posfree):
