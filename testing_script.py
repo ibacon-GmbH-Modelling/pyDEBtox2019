@@ -37,6 +37,10 @@ if __name__ == "__main__":
     rcl = readin.reproclass(Rdata.to_numpy(), reprocase='individual',optcase=1)
     rcl.plot_data_cumulative()
 
+    Rdata2 = pd.read_csv("Test_Rdata.txt", sep="\s+", header=None)
+    rcl2 = readin.reproclass(Rdata2.to_numpy(), reprocase='individual',optcase=2)
+    rcl2.plot_data_cumulative()
+
     Sdata = pd.read_csv("Test_Sdata.txt", sep="\s+", header=None)
     scl = readin.survdataclass(Sdata.to_numpy())
     scl.plot_data(scaleto1=True, label="suviving fraction")
@@ -53,7 +57,7 @@ if __name__ == "__main__":
 
     debmodeltest = mm.DEBtox2019models([full_ds],
                                        debparameters,
-                                       moas, feedbs, Tbp=0,
+                                       moas, feedbs, Tbp=3,
                                        breaktime=0,
                                        solver='LSODA')
     
@@ -76,16 +80,10 @@ if __name__ == "__main__":
 
 
     dt2019.plot_DEBresults(parspace,CI=False,multicore=False) 
-    '''
+    
     debparameters.set_free_onlyone("hb", isfree=True)
-    debhbmodel = mm.DEBtox2019models([hbonly],
-                                    debparameters.full_list,
-                                    debparameters.full_names,
-                                    debparameters.full_islog, 
-                                    debparameters.full_isfree, 
-                                    debparameters.full_lowlim,
-                                    debparameters.full_uplim,
-                                    moas, feedbs, Tbp=3,solver='LSODA')
+    debhbmodel = mm.DEBtox2019models([hbonly], debparameters, 
+                                     moas, feedbs, Tbp=3,solver='LSODA')
     
     
     parspacehb = ps.PyParspace(ps.SettingParspace(0,1), debhbmodel)
@@ -99,17 +97,12 @@ if __name__ == "__main__":
 
     debparameters.full_list = parspacehb.model.parvals
     debparameters.set_freefix_parameters("hb", isfree=False)
-    debparameters.set_freefix_parameters_list(["Lp","Lm","rB","Rm"], isfree=True)
+    debparameters.set_freefix_parameters_list(["lp","lm","rb","rm"], isfree=True)
 
 
     debmodeltest = mm.DEBtox2019models([control_ds],
-                                       debparameters.full_list,
-                                       debparameters.full_names,
-                                       debparameters.full_islog, 
-                                       debparameters.full_isfree, 
-                                       debparameters.full_lowlim,
-                                       debparameters.full_uplim,
-                                       moas, feedbs, Tbp=0,solver='LSODA')
+                                       debparameters,
+                                       moas, feedbs, Tbp=3,solver='LSODA')
 
     parspace = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)  
     lk = debmodeltest.log_likelihood(debparameters.full_list[debmodeltest.posfree],debparameters.full_list,debmodeltest.posfree)
@@ -132,6 +125,7 @@ if __name__ == "__main__":
     debparameters.full_list = parspace.model.parvals
     debparameters.fixfree_physio_pars(isfree=False)
     debparameters.fixfree_tox_pars(isfree=True)
+    
     '''
     print("Starting the tox model fit")
     debparameters.fixfree_physio_pars(isfree=False)
@@ -172,3 +166,4 @@ if __name__ == "__main__":
     # parspacehb = ps.PyParspace.load_class("test_hbfit.pkl")
     # parspacehb.model.solver = 'LSODA'
     # plot_DEBresults(parspacehb, CI=True, multicore=False)
+'''

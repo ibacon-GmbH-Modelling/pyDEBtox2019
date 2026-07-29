@@ -488,7 +488,7 @@ class reproclass(dataclass):
         # optcase can be 0, 1, 2, 3
         # 0: single intermoult period for the entire data set
         # 1: cumulative reproduction, but with the removal of time points with 0 reproduction. Use -1 in the dataset to indicate the appearence of the first egg
-        if optcase not in [0, 1, 2, 3]: 
+        if optcase not in [0, 1, 2]: 
             print("Values that are allowed for case are 0, 1, 2, 3")
             print("case 0 "
             "is for a single intermoult period for the entire data set." \
@@ -502,10 +502,8 @@ class reproclass(dataclass):
             "is for cumulative reproduction, " \
             "but it does not remove the 0s. Good for continuous reproduction")
             print("case 3 "
-            "is for shifting the neonate release back to previous moult. " \
-            "When this option is used, don't shift the model predictions " \
-            "with <glo.Tbp>: the data now represent egg production rather " \
-            "than neonate release")            
+            "The case 3 present in BYOM has not yet being implemented, " \
+            "as it might be problematic already in the matlab implementation")            
         match optcase:
             case 0:
                 # copilot did this. TODO: check if it works properly
@@ -674,8 +672,8 @@ class reproclass(dataclass):
                         Rtmp[ind_eggs] = 0  # turn the -1 into a zero for cumsum
                     cRtmp = np.cumsum(Rtmp,0)  # cumulative reproduction
                     self.dataarray_cumulative[i,:] = cRtmp  # put the cumulated repro back into the data array in the correct column
-            case 3:
-                pass
+            # case 3:
+            #     pass
 
 
     def makerepro_grp(self):
