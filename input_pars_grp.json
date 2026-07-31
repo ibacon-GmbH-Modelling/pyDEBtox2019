@@ -11,7 +11,7 @@
         "Lp": {"value": 1.7982,  "fixed": false, "islog": false, "min": 1.0, "max": 5},
         "Lm": {"value": 3.1175,  "fixed": false, "islog": false, "min": 1.0, "max": 10.0},
         "rB": {"value": 0.14241, "fixed": false, "islog": false, "min": 0.002, "max": 0.3},
-        "Rm": {"value": 1.062,  "fixed": false, "islog": false, "min": 1.0, "max": 20.0},
+        "Rm": {"value": 1.062,  "fixed": false, "islog": false, "min": 0.1, "max": 20.0},
         "f":  {"value": 1.0,     "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
         "hb": {"value": 0.0048,  "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
         "a":  {"value": 1.0,     "fixed": true, "islog": false, "min": 0.0, "max": 10.0}

@@ -277,6 +277,7 @@ class DEBtox2019models:
         self.breaktime = breaktime
         # deal with the actual data and concentration
         self.timeext = []
+        self.newtimeext = []
 
         self.endpoints = np.array([0,1,2,3])
 
@@ -308,6 +309,8 @@ class DEBtox2019models:
                 self.active_endpoints[i].append(0)
             # this is because the more stuff are precalculated before likelihood evaluation, the better
             # makes the code faster
+            newtime = self.timeext[i]
+            self.newtimeext.append(np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime))))
         #TODO: Add print statement to show which parameters are free, which are fixed, and their bounds for verification purposes.
         print("Initialized DEBtox2019models with the following parameters:")
         print("For easiness of reading, log-transformed parameters are shown in their original scale (10^value) if islog is True.")
@@ -442,7 +445,7 @@ class DEBtox2019models:
         target_times = tbp + Tbp
         idx_targets = np.searchsorted(timeext, target_times)
         match_targets = (timeext[idx_targets] == target_times)
-        if not np.any(match_targets):
+        if not np.all(match_targets):
             # No exact matches → likely due to floating-point spacing.
             # If acceptable, we can snap to nearest indices within a small tolerance.
             # Otherwise, skip with a warning.
@@ -898,87 +901,83 @@ class DEBtox2019models:
     #     #transformed = 10**(par95)*islog + par95*(~islog)
     #     return(self.calc_model(concarray_i,time,transformed,moa,feedb,tevals).T)
 
-    def _calc_modelvalues(self):
-        # calculate the model points at exactly the time
-        # points of the experimental data
-        basepars = self.parvals.copy()
-        basepars[self.islog] = 10 ** basepars[self.islog]
-        modelsolcontainer = [None]*self.ndatasets
-        for nd in range(self.ndatasets):  # iterate over datasets
-            modelpars = self.build_dataset_parameters(basepars, nd)
-            fullmodelvector1 = np.array([])
-            fullmodelvector2 = np.array([])
-            fulllengthvector = np.array([])
-            fullreprovector = np.array([])
-            fullweightslengthvector = np.array([])
-            fullweightsreprovector = np.array([])
-            newtime = self.timeext[nd]
-            modelsoltreatlevel = np.full((4,len(newtime)),np.nan) 
-            # FIX this part for the brood pouch delay.
-            # CHECK if anything can be pre-computed
-            # tbp = 0 # make sure it is declared here
-            newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime)))
-            # print("newtimeext: ", newtimeext)
-            for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
-                try:
-                    modelsol = self.calc_model(self.concstruct_list[nd].concarraytr[i], self.concstruct_list[nd].timetr,
-                                               modelpars, self.moa, self.feedb,
-                                               newtimeext)
-                except:
-                    # there was a problem with the ODE solver
-                    return(np.inf)
-                
-                idx_targets = np.searchsorted(newtimeext, self.timeext[nd])
-                # match_targets = (self.timeext[nd][idx_targets] == target_times)
-                
-                # mask = np.isin(newtimeext,self.timeext[nd])
-                # indices = np.nonzero(mask)[0]
-                # # print("indices", indices)
-                #modelsol = modelsol[:,idx_targets]
-                # modelsoltreatlevel = modelsol[:,idx_targets]
-                # modelsolcontainer[nd] = modelsoltreatlevel
-                # print("modelsol before substitution: ")
-                # print(modelsol[2,:])
-
-                for endpoint in self.active_endpoints[nd]:
-                    if endpoint == 0:
-                        # llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
-                        #                                 self.survstruct_list[nd].deatharraytreat[i])
-                        # # print("llsurv treatment ", i)
-                        # # print(llsurv)
-                        # llik += llsurv
-                        modelsoltreatlevel[:, self.indexcommon_surv[nd][i]] = modelsol[:, self.indexcommon_surv[nd][i]] 
-                    elif (endpoint == 1):  # length
-                        lengthtreat = self.lengthstruct_list[nd].flatdataclean[i]
-                        weights = self.lengthstruct_list[nd].flatweightsclean[i]
-                        commontime =  np.array([self.indexcommon_length[nd][j] for j in range(len(self.indexcommon_length[nd])) if self.lengthstruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-                        modelvector = np.tile(modelsol[1, :][commontime[0]],len(commontime))[self.lengthstruct_list[nd].indfintable[i]]
-
-                        fullmodelvector1 = np.concatenate((fullmodelvector1, modelvector))
-                        fulllengthvector = np.concatenate((fulllengthvector, lengthtreat))
-                        fullweightslengthvector = np.concatenate((fullweightslengthvector, weights))
-                    elif (endpoint == 2):  # reproduction
-                        reprotreat = self.reprostruct_list[nd].flatdataclean[i]
-                        weights = self.reprostruct_list[nd].flatweightsclean[i]
-                        commontime =  np.array([self.indexcommon_repro[nd][j] for j in range(len(self.indexcommon_repro[nd])) if self.reprostruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-                        modelvector = np.tile(modelsol[2, :][commontime[0]],len(commontime))[self.reprostruct_list[nd].indfintable[i]]
-                        fullmodelvector2 = np.concatenate((fullmodelvector2, modelvector))
-                        fullreprovector = np.concatenate((fullreprovector, reprotreat))
-                        fullweightsreprovector = np.concatenate((fullweightsreprovector, weights))
-            if self.lengthstruct_list[nd] is not None:
-                transf = self.lengthstruct_list[nd].statstype
-                lllength = scaled_loglikelihood(fullmodelvector1, fulllengthvector, fullweightslengthvector, transf)
-                # print("lllength treatment ", i)
-                # print(lllength)
-                llik += lllength
-            if self.reprostruct_list[nd] is not None:
-                transf = self.reprostruct_list[nd].statstype
-                llrepro = scaled_loglikelihood(fullmodelvector2, fullreprovector, fullweightsreprovector, transf)
-                # print("llrepro treatment ", i)
-                # print(llrepro)
-                llik += llrepro
-        # print("Total llk: ", -llik)
-        return(modelsolcontainer)
+    # def _calc_modelvalues(self):
+    #     # calculate the model points at exactly the time
+    #     # points of the experimental data
+    #     basepars = self.parvals.copy()
+    #     basepars[self.islog] = 10 ** basepars[self.islog]
+    #     modelsolcontainer = [None]*self.ndatasets
+    #     for nd in range(self.ndatasets):  # iterate over datasets
+    #         modelpars = self.build_dataset_parameters(basepars, nd)
+    #         fullmodelvector1 = np.array([])
+    #         fullmodelvector2 = np.array([])
+    #         fulllengthvector = np.array([])
+    #         fullreprovector = np.array([])
+    #         fullweightslengthvector = np.array([])
+    #         fullweightsreprovector = np.array([])
+    #         newtime = self.timeext[nd]
+    #         modelsoltreatlevel = np.full((4,len(newtime)),np.nan) 
+    #         # FIX this part for the brood pouch delay.
+    #         # CHECK if anything can be pre-computed
+    #         # tbp = 0 # make sure it is declared here
+    #         newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime)))
+    #         # print("newtimeext: ", newtimeext)
+    #         for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
+    #             try:
+    #                 modelsol = self.calc_model(self.concstruct_list[nd].concarraytr[i], self.concstruct_list[nd].timetr,
+    #                                            modelpars, self.moa, self.feedb,
+    #                                            newtimeext)
+    #             except:
+    #                 # there was a problem with the ODE solver
+    #                 return(np.inf)
+    #             idx_targets = np.searchsorted(newtimeext, self.timeext[nd])
+    #             # match_targets = (self.timeext[nd][idx_targets] == target_times)
+    #             # mask = np.isin(newtimeext,self.timeext[nd])
+    #             # indices = np.nonzero(mask)[0]
+    #             # # print("indices", indices)
+    #             #modelsol = modelsol[:,idx_targets]
+    #             # modelsoltreatlevel = modelsol[:,idx_targets]
+    #             # modelsolcontainer[nd] = modelsoltreatlevel
+    #             # print("modelsol before substitution: ")
+    #             # print(modelsol[2,:])
+    #             for endpoint in self.active_endpoints[nd]:
+    #                 if endpoint == 0:
+    #                     # llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
+    #                     #                                 self.survstruct_list[nd].deatharraytreat[i])
+    #                     # # print("llsurv treatment ", i)
+    #                     # # print(llsurv)
+    #                     # llik += llsurv
+    #                     modelsoltreatlevel[:, self.indexcommon_surv[nd][i]] = modelsol[:, self.indexcommon_surv[nd][i]] 
+    #                 elif (endpoint == 1):  # length
+    #                     lengthtreat = self.lengthstruct_list[nd].flatdataclean[i]
+    #                     weights = self.lengthstruct_list[nd].flatweightsclean[i]
+    #                     commontime =  np.array([self.indexcommon_length[nd][j] for j in range(len(self.indexcommon_length[nd])) if self.lengthstruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
+    #                     modelvector = np.tile(modelsol[1, :][commontime[0]],len(commontime))[self.lengthstruct_list[nd].indfintable[i]]
+    #                     fullmodelvector1 = np.concatenate((fullmodelvector1, modelvector))
+    #                     fulllengthvector = np.concatenate((fulllengthvector, lengthtreat))
+    #                     fullweightslengthvector = np.concatenate((fullweightslengthvector, weights))
+    #                 elif (endpoint == 2):  # reproduction
+    #                     reprotreat = self.reprostruct_list[nd].flatdataclean[i]
+    #                     weights = self.reprostruct_list[nd].flatweightsclean[i]
+    #                     commontime =  np.array([self.indexcommon_repro[nd][j] for j in range(len(self.indexcommon_repro[nd])) if self.reprostruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
+    #                     modelvector = np.tile(modelsol[2, :][commontime[0]],len(commontime))[self.reprostruct_list[nd].indfintable[i]]
+    #                     fullmodelvector2 = np.concatenate((fullmodelvector2, modelvector))
+    #                     fullreprovector = np.concatenate((fullreprovector, reprotreat))
+    #                     fullweightsreprovector = np.concatenate((fullweightsreprovector, weights))
+    #         if self.lengthstruct_list[nd] is not None:
+    #             transf = self.lengthstruct_list[nd].statstype
+    #             lllength = scaled_loglikelihood(fullmodelvector1, fulllengthvector, fullweightslengthvector, transf)
+    #             # print("lllength treatment ", i)
+    #             # print(lllength)
+    #             llik += lllength
+    #         if self.reprostruct_list[nd] is not None:
+    #             transf = self.reprostruct_list[nd].statstype
+    #             llrepro = scaled_loglikelihood(fullmodelvector2, fullreprovector, fullweightsreprovector, transf)
+    #             # print("llrepro treatment ", i)
+    #             # print(llrepro)
+    #             llik += llrepro
+    #     # print("Total llk: ", -llik)
+    #     return(modelsolcontainer)
 
     
     def worker_DEBresults(
@@ -1045,22 +1044,22 @@ class DEBtox2019models:
             fullreprovector = np.array([])
             fullweightslengthvector = np.array([])
             fullweightsreprovector = np.array([])
-            newtime = self.timeext[nd]
-            # FIX this part for the brood pouch delay.
-            # CHECK if anything can be pre-computed
-            # tbp = 0 # make sure it is declared here
-            newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime)))
+            # newtime = self.timeext[nd]
+            # # FIX this part for the brood pouch delay.
+            # # CHECK if anything can be pre-computed
+            # # tbp = 0 # make sure it is declared here
+            # newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime)))
             # print("newtimeext: ", newtimeext)
             for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
                 try:
                     modelsol = self.calc_model(self.concstruct_list[nd].concarraytr[i], self.concstruct_list[nd].timetr,
                                                modelpars, self.moa, self.feedb,
-                                               newtimeext)
+                                               self.newtimeext[nd])
                 except:
                     # there was a problem with the ODE solver
                     return(np.inf)
                 
-                idx_targets = np.searchsorted(newtimeext, self.timeext[nd])
+                idx_targets = np.searchsorted(self.newtimeext[nd], self.timeext[nd])
                 # match_targets = (self.timeext[nd][idx_targets] == target_times)
                 
                 # mask = np.isin(newtimeext,self.timeext[nd])

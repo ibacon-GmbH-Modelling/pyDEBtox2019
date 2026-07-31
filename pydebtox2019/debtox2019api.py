@@ -114,7 +114,7 @@ def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0, wmeans=F
             scl.add_plotdata(ax[k,i],ntreat=treatmentnames[i], scaleto1=True,wmeans=wmeans)
             ax[k,i].plot(tevals,sol[0][3], 'k--')
             ax[k,i].plot(tevals,sol[i][3])
-            ax[k,i].set_ylim=[0,1.1]
+            ax[k,i].set_ylim([0,1.1])
             if CI:
                 ax[k,i].fill_between(tevals, low[:,3], upp[:,3], color='gray', alpha=0.5)
             #ax[k,i].set_xlabel("Time (d)")
@@ -1623,10 +1623,13 @@ class DEBparameters:
         # ------------------------------------------------------------------
         # Helper to set limits by logical (base) parameter name
         # ------------------------------------------------------------------
+        touched_names = set()
+
         def set_limits(parname, low, high):
             mask = self.full_base_names == parname
             self.full_lowlim[mask] = low
             self.full_uplim[mask] = high
+            touched_names.add(parname)
     
         # ------------------------------------------------------------------
         # kd (dominant rate constant)
@@ -1686,9 +1689,12 @@ class DEBparameters:
         set_limits("bb", bblow, bbup)
     
         # ------------------------------------------------------------------
-        # Convert limits to log-space where needed
+        # Convert limits to log-space where needed. Only the bounds just set
+        # above (in linear space) need this; every other parameter's bounds
+        # are already in log10-space from __init__, so touching them again
+        # here would double-apply log10 and corrupt them.
         # ------------------------------------------------------------------
         for i in range(len(self.full_names)):
-            if self.full_islog[i]:
+            if self.full_islog[i] and self.full_base_names[i] in touched_names:
                 self.full_lowlim[i] = np.log10(self.full_lowlim[i])
                 self.full_uplim[i] = np.log10(self.full_uplim[i])

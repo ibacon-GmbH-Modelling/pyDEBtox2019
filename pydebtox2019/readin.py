@@ -301,7 +301,7 @@ class dataclass:
             ind_nonzero = np.where(row_sums != 0)[0]
             if self.statstype == 0:
                 # logtransform
-                data_in = np.log(datain,1e-10) # use with caution
+                data_in = np.log(np.maximum(datain, 1e-10)) # use with caution
             else:
                 data_in = datain ** self.statstype
 

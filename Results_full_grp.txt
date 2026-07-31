@@ -1,0 +1,277 @@
+(pyiba) PS C:\Users\CarloR\Documents\pyDEBtox2019> ipython --pylab=qt -i .\testing_script_grprepro.py
+Python 3.11.15 | packaged by Anaconda, Inc. | (main, Jun 11 2026, 15:12:53) [MSC v.1942 64 bit (AMD64)]
+Type 'copyright', 'credits' or 'license' for more information
+IPython 9.15.0 -- An enhanced Interactive Python. Type '?' for help.
+Tip: You can use Ctrl-O to force a new line in terminal IPython
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\debtox2019api.py:1554: RuntimeWarning: divide by zero encountered in log10
+  self.full_lowlim[i] = np.log10(self.full_lowlim[i])
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\readin.py:148: RuntimeWarning: invalid value encountered in divide
+  self.concslopestr[i,:-1] = np.diff(self.concarraytr[i])/np.diff(self.time)
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\readin.py:148: RuntimeWarning: divide by zero encountered in divide
+  self.concslopestr[i,:-1] = np.diff(self.concarraytr[i])/np.diff(self.time)
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\readin.py:317: RuntimeWarning: Mean of empty slice
+  data_mn[ind_zero] = np.nanmean(data_in[:, ind_zero], axis=0)
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\readin.py:318: RuntimeWarning: Mean of empty slice
+  data_mnnt[ind_zero] = np.nanmean(datain[:, ind_zero], axis=0)
+C:\Users\CarloR\miniconda3\envs\pyiba\Lib\site-packages\numpy\lib\nanfunctions.py:1879: RuntimeWarning: Degrees of freedom <= 0 for slice.
+  var = nanvar(a, axis=axis, dtype=dtype, out=out, ddof=ddof,
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\readin.py:337: RuntimeWarning: invalid value encountered in divide
+  b = (sum_w ** 2) / sum_w_sq
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\readin.py:772: RuntimeWarning: divide by zero encountered in divide
+  self.dataarray_cumulative = np.cumsum(Rval / Fnew, axis=1)
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\readin.py:772: RuntimeWarning: invalid value encountered in divide
+  self.dataarray_cumulative = np.cumsum(Rval / Fnew, axis=1)
+Initialized DEBtox2019models with the following parameters:
+For easiness of reading, log-transformed parameters are shown in their original scale (10^value) if islog is True.
+Parameter  Value    Log-Tr.  Free   Lower Bound Upper Bound
+fbv        0.0200   0        0      (0.0000    , 0.0000    )
+krv        1.0000   0        0      (0.0000    , 0.0000    )
+kap        0.8000   0        0      (0.0000    , 0.0000    )
+yp         0.6400   0        0      (0.0000    , 0.0000    )
+lm_ref     5.0000   0        0      (0.0000    , 0.0000    )
+l0         0.8800   0        0      (0.0000    , 10.0000   )
+lp         1.7982   0        1      (1.0000    , 5.0000    )
+lm         3.1175   0        1      (1.0000    , 10.0000   )
+rb         0.1424   0        1      (0.0020    , 0.3000    )
+rm         1.0620   0        1      (0.1000    , 20.0000   )
+f          1.0000   0        0      (0.0000    , 10.0000   )
+hb         0.0048   0        0      (0.0000    , 10.0000   )
+a          1.0000   0        0      (0.0000    , 10.0000   )
+lf         0.0000   0        0      (0.0000    , 10.0000   )
+lj         0.0000   0        0      (0.0000    , 10.0000   )
+tlag       0.0000   0        0      (0.0000    , 10.0000   )
+kd         0.0316   1        0      (0.0100    , 10.0000   )
+bb         19.9526  1        0      (0.2345    , 960.0777  )
+zb         0.0501   1        0      (0.0004    , 0.8445    )
+bs         1.2589   1        0      (0.0044    , 512.4315  )
+zs         1.2589   1        0      (0.0004    , 0.8445    )
+plotting the results
+Initialized DEBtox2019models with the following parameters:
+For easiness of reading, log-transformed parameters are shown in their original scale (10^value) if islog is True.
+Parameter  Value    Log-Tr.  Free   Lower Bound Upper Bound
+fbv        0.0200   0        0      (0.0000    , 0.0000    )
+krv        1.0000   0        0      (0.0000    , 0.0000    )
+kap        0.8000   0        0      (0.0000    , 0.0000    )
+yp         0.6400   0        0      (0.0000    , 0.0000    )
+lm_ref     5.0000   0        0      (0.0000    , 0.0000    )
+l0         0.8800   0        0      (0.0000    , 10.0000   )
+lp         1.7982   0        0      (1.0000    , 5.0000    )
+lm         3.1175   0        0      (1.0000    , 10.0000   )
+rb         0.1424   0        0      (0.0020    , 0.3000    )
+rm         1.0620   0        0      (0.1000    , 20.0000   )
+f          1.0000   0        0      (0.0000    , 10.0000   )
+hb         0.0048   0        1      (0.0000    , 10.0000   )
+a          1.0000   0        0      (0.0000    , 10.0000   )
+lf         0.0000   0        0      (0.0000    , 10.0000   )
+lj         0.0000   0        0      (0.0000    , 10.0000   )
+tlag       0.0000   0        0      (0.0000    , 10.0000   )
+kd         0.0316   1        0      (0.0100    , 10.0000   )
+bb         19.9526  1        0      (0.2345    , 960.0777  )
+zb         0.0501   1        0      (0.0004    , 0.8445    )
+bs         1.2589   1        0      (0.0044    , 512.4315  )
+zs         1.2589   1        0      (0.0004    , 0.8445    )
+['Starting round ', 1, ' Initial run with ', 10, ' parameter sets']
+So far best likelihood value is: 230.2585
+['Starting round ', 2, ', refining a selection of ', 6, ' parameter sets, with ', 60.0, ' tries each']
+  Status:  0  sets within total CI and  0  within inner. Best fit: 11.6810
+Removed  0  duplicate values
+['Starting round ', 3, ', refining a selection of ', 5, ' parameter sets, with ', 40.0, ' tries each']
+  Status:  4  sets within total CI and  4  within inner. Best fit: 11.6817
+Removed  0  duplicate values
+['Starting round ', 4, ', refining a selection of ', 5, ' parameter sets, with ', 60.0, ' tries each']
+  Status:  6  sets within total CI and  6  within inner. Best fit: 11.6805
+Removed  0  duplicate values
+['Starting round ', 5, ', refining a selection of ', 10, ' parameter sets, with ', 80.0, ' tries each']
+  Status:  20  sets within total CI and  20  within inner. Best fit: 11.6805
+Removed  0  duplicate values
+['Starting round ', 6, ', refining a selection of ', 31, ' parameter sets, with ', 40.0, ' tries each']
+  Status:  37  sets within total CI and  37  within inner. Best fit: 11.6805
+Removed  1  duplicate values
+['Starting round ', 7, ', refining a selection of ', 55, ' parameter sets, with ', 40.0, ' tries each']
+  Status:  108  sets within total CI and  108  within inner. Best fit: 11.6805
+Removed  1  duplicate values
+['Starting round ', 8, ', refining a selection of ', 121, ' parameter sets, with ', 40.0, ' tries each']
+  Status:  336  sets within total CI and  336  within inner. Best fit: 11.6805
+Removed  1  duplicate values
+['Starting round ', 9, ', refining a selection of ', 359, ' parameter sets, with ', 13.0, ' tries each']
+  Status:  347  sets within total CI and  347  within inner. Best fit: 11.6805
+Removed  1  duplicate values
+['Starting round ', 10, ', refining a selection of ', 367, ' parameter sets, with ', 13.0, ' tries each']
+  Status:  346  sets within total CI and  346  within inner. Best fit: 11.6805
+Removed  1  duplicate values
+['Starting round ', 11, ', refining a selection of ', 379, ' parameter sets, with ', 13.0, ' tries each']
+  Status:  318  sets within total CI and  318  within inner. Best fit: 11.6805
+Removed  1  duplicate values
+['Starting round ', 12, ', refining a selection of ', 333, ' parameter sets, with ', 15.0, ' tries each']
+  Status:  359  sets within total CI and  359  within inner. Best fit: 11.6805
+  Stopping criterion not met after  12  rounds
+Removed  1  duplicate values
+Loop is over
+Now we proform a final simplex optimization
+  Status:  359  sets within total CI and  359  within inner. Best fit: 11.6805
+Starting round  13  for profile likelihood of each parameter
+Profiling has led to a new optimum, which left insufficient sets in the inner rim: extra sampling rounds will be started.
+Starting round  13  (extra  1 ) refining  10  parameter sets, with  40  tries each
+Results obtained with the parameters space explorer with profiling option.
+Best fit likelihood: 11.68
+Best fit AIC: 25.36
+Parameter values:
+Parameter       Best       Lower 95%       Upper 95%       l.bound hit u.bound hit broken CI  
+hb              0.0040     (0.0007         0.0122        ) 0           0           0          
+Time for hb model fit:  61.105883836746216
+plotting the results
+Initialized DEBtox2019models with the following parameters:
+For easiness of reading, log-transformed parameters are shown in their original scale (10^value) if islog is True.
+Parameter  Value    Log-Tr.  Free   Lower Bound Upper Bound
+fbv        0.0200   0        0      (0.0000    , 0.0000    )
+krv        1.0000   0        0      (0.0000    , 0.0000    )
+kap        0.8000   0        0      (0.0000    , 0.0000    )
+yp         0.6400   0        0      (0.0000    , 0.0000    )
+lm_ref     5.0000   0        0      (0.0000    , 0.0000    )
+l0         0.8800   0        0      (0.0000    , 10.0000   )
+lp         1.7982   0        1      (1.0000    , 5.0000    )
+lm         3.1175   0        1      (1.0000    , 10.0000   )
+rb         0.1424   0        1      (0.0020    , 0.3000    )
+rm         1.0620   0        1      (0.1000    , 20.0000   )
+f          1.0000   0        0      (0.0000    , 10.0000   )
+hb         0.0040   0        0      (0.0000    , 10.0000   )
+a          1.0000   0        0      (0.0000    , 10.0000   )
+lf         0.0000   0        0      (0.0000    , 10.0000   )
+lj         0.0000   0        0      (0.0000    , 10.0000   )
+tlag       0.0000   0        0      (0.0000    , 10.0000   )
+kd         0.0316   1        0      (0.0100    , 10.0000   )
+bb         19.9526  1        0      (0.2345    , 960.0777  )
+zb         0.0501   1        0      (0.0004    , 0.8445    )
+bs         1.2589   1        0      (0.0044    , 512.4315  )
+zs         1.2589   1        0      (0.0004    , 0.8445    )
+['Starting round ', 1, ' Initial run with ', 10000, ' parameter sets']
+So far best likelihood value is: 281.2747
+['Starting round ', 2, ', refining a selection of ', 201, ' parameter sets, with ', 60.0, ' tries each']
+  Status:  0  sets within total CI and  0  within inner. Best fit: 256.9060
+Removed  0  duplicate values
+['Starting round ', 3, ', refining a selection of ', 200, ' parameter sets, with ', 40.0, ' tries each']
+  Status:  3  sets within total CI and  1  within inner. Best fit: 256.9061
+Removed  0  duplicate values
+['Starting round ', 4, ', refining a selection of ', 200, ' parameter sets, with ', 60.0, ' tries each']
+  Status:  39  sets within total CI and  5  within inner. Best fit: 256.9061
+Removed  0  duplicate values
+['Starting round ', 5, ', refining a selection of ', 200, ' parameter sets, with ', 80.0, ' tries each']
+  Status:  448  sets within total CI and  47  within inner. Best fit: 256.9060
+Removed  0  duplicate values
+['Starting round ', 6, ', refining a selection of ', 817, ' parameter sets, with ', 40.0, ' tries each']
+  Status:  3010  sets within total CI and  444  within inner. Best fit: 256.9060
+Removed  0  duplicate values
+['Starting round ', 7, ', refining a selection of ', 4427, ' parameter sets, with ', 5.0, ' tries each']
+  Status:  4769  sets within total CI and  780  within inner. Best fit: 256.9060
+Removed  0  duplicate values
+['Starting round ', 8, ', refining a selection of ', 5584, ' parameter sets, with ', 5.0, ' tries each']
+  Status:  11098  sets within total CI and  2329  within inner. Best fit: 256.9060
+Next round will be focussed on the inner rim (outer rim has enough values)
+Removed  0  duplicate values
+['Starting round ', 9, ', refining a selection of ', 402, ' parameter sets, with ', 5.0, ' tries each']
+  Status:  1061  sets within total CI and  311  within inner. Best fit: 256.9061
+Removed  0  duplicate values
+['Starting round ', 10, ', refining a selection of ', 1116, ' parameter sets, with ', 20.0, ' tries each']
+  Status:  10567  sets within total CI and  3195  within inner. Best fit: 256.9060
+  Stopping criterion met:  10567  sets within total CI and  3195  within inner
+Removed  0  duplicate values
+Loop is over
+Now we proform a final simplex optimization
+  Status:  10568  sets within total CI and  3196  within inner. Best fit: 256.9060
+Starting round  11  for profile likelihood of each parameter
+  Extending profile to lower bound of parameter  6
+  Extending profile to higher bound of parameter  8
+  Extending profile to higher bound of parameter  6
+  Extending profile to higher bound of parameter  9
+The profiling found a new minimum. Optimizing from here
+Profiling has detected gaps between profile and sample, which requires extra sampling rounds.
+Starting round  11  (extra  1 ) refining  92  parameter sets, with  40  tries each
+Starting round  11  (extra  2 ) refining  2  parameter sets, with  40  tries each
+Results obtained with the parameters space explorer with profiling option.
+Best fit likelihood: 256.91
+Best fit AIC: 521.81
+Parameter values:
+Parameter       Best       Lower 95%       Upper 95%       l.bound hit u.bound hit broken CI  
+lp              2.5317     (2.4065         2.5955        ) 0           0           0          
+lm              3.1228     (3.0436         3.2129        ) 0           0           0          
+rb              0.1414     (0.1272         0.1567        ) 0           0           0          
+rm              0.9221     (0.7390         1.1120        ) 0           0           0          
+Time for physiological model fit:  312.08643198013306
+plotting the results
+Initialized DEBtox2019models with the following parameters:
+For easiness of reading, log-transformed parameters are shown in their original scale (10^value) if islog is True.
+Parameter  Value    Log-Tr.  Free   Lower Bound Upper Bound
+fbv        0.0200   0        0      (0.0000    , 0.0000    )
+krv        1.0000   0        0      (0.0000    , 0.0000    )
+kap        0.8000   0        0      (0.0000    , 0.0000    )
+yp         0.6400   0        0      (0.0000    , 0.0000    )
+lm_ref     5.0000   0        0      (0.0000    , 0.0000    )
+l0         0.8800   0        0      (0.0000    , 10.0000   )
+lp         2.5317   0        0      (1.0000    , 5.0000    )
+lm         3.1228   0        0      (1.0000    , 10.0000   )
+rb         0.1414   0        0      (0.0020    , 0.3000    )
+rm         0.9221   0        0      (0.1000    , 20.0000   )
+f          1.0000   0        0      (0.0000    , 10.0000   )
+hb         0.0040   0        0      (0.0000    , 10.0000   )
+a          1.0000   0        0      (0.0000    , 10.0000   )
+lf         0.0000   0        0      (0.0000    , 10.0000   )
+lj         0.0000   0        0      (0.0000    , 10.0000   )
+tlag       0.0000   0        0      (0.0000    , 10.0000   )
+kd         0.0316   1        1      (0.0100    , 10.0000   )
+bb         19.9526  1        1      (0.2345    , 960.0777  )
+zb         0.0501   1        1      (0.0004    , 0.8445    )
+bs         1.2589   1        1      (0.0044    , 512.4315  )
+zs         1.2589   1        1      (0.0004    , 0.8445    )
+['Starting round ', 1, ' Initial run with ', 10000, ' parameter sets']
+So far best likelihood value is: 812.2281
+['Starting round ', 2, ', refining a selection of ', 2390, ' parameter sets, with ', 41.0, ' tries each']
+  Status:  5676  sets within total CI and  833  within inner. Best fit: 811.6175
+Removed  0  duplicate values
+['Starting round ', 3, ', refining a selection of ', 801, ' parameter sets, with ', 40.0, ' tries each']
+  Status:  21124  sets within total CI and  7270  within inner. Best fit: 811.6175
+  Stopping criterion met:  21124  sets within total CI and  7270  within inner
+Removed  0  duplicate values
+Loop is over
+Now we proform a final simplex optimization
+  Status:  21125  sets within total CI and  7271  within inner. Best fit: 811.6175
+Starting round  4  for profile likelihood of each parameter
+  Extending profile to lower bound of parameter  19
+  Extending profile to lower bound of parameter  18
+  Extending profile to lower bound of parameter  16
+  Extending profile to lower bound of parameter  20
+The profiling found a new minimum. Optimizing from here
+C:\Users\CarloR\Documents\pyDEBtox2019\pydebtox2019\parspace.py:380: OptimizeWarning: Initial guess is not within the specified bounds
+  res = optim.minimize(self.model.log_likelihood,
+Profiling has detected gaps between profile and sample, which requires extra sampling rounds.
+Starting round  4  (extra  1 ) refining  126  parameter sets, with  40  tries each
+Starting round  4  (extra  2 ) refining  68  parameter sets, with  40  tries each
+Starting round  4  (extra  3 ) refining  42  parameter sets, with  40  tries each
+Starting round  4  (extra  4 ) refining  12  parameter sets, with  40  tries each
+Starting round  4  (extra  5 ) refining  8  parameter sets, with  40  tries each
+Starting round  5 , refining the profile likelihoods for each parameter again
+  Extending profile to lower bound of parameter  16
+  Extending profile to lower bound of parameter  20
+Status:  26767  sets within total CI and  10049  within inner. Best fit:  811.5685460817054
+Now profiling has detected gaps, which require additional sampling rounds.
+Starting round  5  (extra  1 ) refining  9  parameter sets, with  40  tries each
+Starting round  5  (extra  2 ) refining  4  parameter sets, with  40  tries each
+Starting round  5  (extra  3 ) refining  4  parameter sets, with  40  tries each
+Starting round  5  (extra  4 ) refining  4  parameter sets, with  40  tries each
+Starting round  5  (extra  5 ) refining  4  parameter sets, with  40  tries each
+Exiting parspace explorer, but still  4  sets flagged (too much distance between profile and sample). Check plot.
+Results obtained with the parameters space explorer with profiling option.
+Best fit likelihood: 811.57
+Best fit AIC: 1633.14
+Parameter values:
+Parameter       Best       Lower 95%       Upper 95%       l.bound hit u.bound hit broken CI  
+kd              0.0554     (0.0100         0.1498        ) 1           0           0          
+bb              9.9758     (4.1633         960.0777      ) 0           1           0          
+zb              0.0599     (0.0065         0.1512        ) 0           0           0          
+bs              512.4315   (0.0044         512.4315      ) 1           1           0          
+zs              0.3246     (0.0004         0.8445        ) 1           1           0          
+Time for tox fit:  3967.5855824947357
+plotting the results
+
+C:\Users\CarloR\miniconda3\envs\pyiba\Lib\site-packages\IPython\terminal\pt_inputhooks\qt.py:16: UserWarning: The figure layout has changed to tight
+  obj.exec() if hasattr(obj, "exec") else obj.exec_()
+In [1]: 

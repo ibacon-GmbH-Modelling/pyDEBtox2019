@@ -25,11 +25,11 @@ if __name__ == "__main__":
     moas = np.array([0,0,0,0,1])
     feedbs =  np.array([0,0,0,0])
 
-    Cdata = pd.read_csv("Test_Cdata.txt", sep="\s+", header=None)
+    Cdata = pd.read_csv("Test_Cgrp.txt", sep="\s+", header=None)
     ccl = readin.concclass(Cdata.to_numpy(),"","ug/L")
     ccl.plot_exposure()
 
-    Ldata = pd.read_csv("Test_Ldata.txt", sep="\s+", header=None)
+    Ldata = pd.read_csv("Test_Lgrp.txt", sep="\s+", header=None)
     lcl = readin.lengthdataclass(Ldata.to_numpy())
     lcl.calc_mean_and_ci()
     lcl.plot_data(wmeans=True)
@@ -70,4 +70,48 @@ if __name__ == "__main__":
     # print(lk)
 
     dt2019.plot_DEBresults(parspace,CI=False,multicore=False) 
+
+    debparameters.set_free_onlyone('hb', isfree=True)
+    debmodelhb = mm.DEBtox2019models([hbonly],
+                                       debparameters,
+                                       moas, feedbs, Tbp=0,
+                                       breaktime=0,
+                                       solver='LSODA')
+    parspacehb = ps.PyParspace(ps.SettingParspace(0,1), debmodelhb)
+    startt = time.time()
+    parspacehb.run_parspace()
+    endt = time.time()
+    print("Time for hb model fit: ", endt-startt)
+    dt2019.plot_DEBresults(parspaceres=parspacehb,wmeans=False)
+
+
+    debparameters.full_list = parspacehb.model.parvals
+    debparameters.set_freefix_parameters("hb", isfree=False)
+    debparameters.set_freefix_parameters_list(["lp","lm","rb","rm"], isfree=True)
+
+    debmodelctrl = mm.DEBtox2019models([control_ds],
+                                       debparameters,
+                                       moas, feedbs, Tbp=0,solver='LSODA')
+    parspacectrl = ps.PyParspace(ps.SettingParspace(0,1), debmodelctrl)  
+    startt = time.time()
+    parspacectrl.run_parspace()
+    endt = time.time()
+    print("Time for physiological model fit: ", endt-startt)
+    dt2019.plot_DEBresults(parspacectrl,CI=True,multicore=True)
+
     
+    # debparameters.full_list = parspacectrl.model.parvals
+    # debparameters.fixfree_physio_pars(isfree=False)
+    # debparameters.fixfree_tox_pars(isfree=True)
+
+    # debmodeltox = mm.DEBtox2019models([full_ds],
+    #                                    debparameters,
+    #                                    moas, feedbs, Tbp=0,
+    #                                    breaktime=1,
+    #                                    solver='LSODA')
+    # parspacetox = ps.PyParspace(ps.SettingParspace(0,1),debmodeltox)
+    # startt=time.time()
+    # parspacetox.run_parspace()
+    # endt=time.time()
+    # print("Time for tox fit: ",endt-startt)
+    # dt2019.plot_DEBresults(parspacetox,CI=True,multicore=True)
