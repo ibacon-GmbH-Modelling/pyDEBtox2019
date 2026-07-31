@@ -407,6 +407,7 @@ class survdataclass(dataclass):
         if dataarray is None:
             dataarray = self.dataarray
         if scaleto1:
+            dataarray = np.array(dataarray, copy=True)  # avoid mutating the underlying data
             for i in range(dataarray.shape[0]):
                 ninit =dataarray[i,0]
                 dataarray[i,:] = dataarray[i,:]/ninit
@@ -462,10 +463,13 @@ class lengthdataclass(dataclass):
 class reproclass(dataclass):
     # this class might need in the input also the
     # survival data and female data
-    def __init__(self,reprodata, reprocase, optcase, survtable = None, femaletable = None):
+    def __init__(self,reprodata, reprocase, optcase, survtable = None, femaletable = None, sexratio = 0.5):
         super().__init__(reprodata)
         self.reprocase = reprocase
         self.optcase = optcase
+        self.survtable = survtable
+        self.femaletable = femaletable
+        self.sexratio = sexratio
         self.dataarray_cumulative = np.copy(self.dataarray)
         self.reprocumtreat = []
         # insert here all the details of the repro handling
@@ -474,7 +478,7 @@ class reproclass(dataclass):
         if reprocase == "individual":
             self.makerepro_ind(optcase)
         elif reprocase == "group":
-            self.makerepro_grp()
+            self.makerepro_grp(self.survtable, self.femaletable, self.sexratio)
         # elif reprocase == "sex":
         #     self.makerepro_sex()
         for i in range(self.ntreats):
@@ -676,8 +680,96 @@ class reproclass(dataclass):
             #     pass
 
 
-    def makerepro_grp(self):
-        pass
+    def _parse_raw_table(self, table, name):
+        '''
+        Parse a BYOM-style raw table (first row = treatment/replicate ids,
+        preceded by a type code; first column = time, preceded by the same
+        code) into a time vector and a value array laid out as
+        (nreplicates, ntime), i.e. the same orientation as self.dataarray.
+        '''
+        table = np.asarray(table, dtype=float)
+        if table.shape[1] - 1 != self.ntreats:
+            raise ValueError(
+                f"The {name} table must have the same number of treatments/replicates "
+                f"as the reproduction data")
+        time = table[1:, 0]
+        values = np.transpose(table[1:, 1:])
+        return time, values
+
+    def makerepro_grp(self, survtable=None, femaletable=None, sexratio=0.5):
+        '''
+        Translation of BYOM's makerepro_grp.m. Converts reproduction data for
+        grouped animals (offspring summed over all mothers in a replicate)
+        into the mean cumulative reproduction per female, weighted by the
+        (estimated) number of females alive over each time interval.
+
+        survtable: raw survivor table (same layout as reprodata), required.
+        femaletable: raw table with the number of females observed at the
+            point of sex determination (one time point per replicate). If
+            None, the number of females is assumed to be the number of
+            survivors times sexratio at every time point.
+        sexratio: presumed female:male sex ratio, used when femaletable is
+            None, and to account for the (unknown) sex of animals that died.
+        '''
+        if survtable is None:
+            raise ValueError(
+                "makerepro_grp requires a survtable (survivor counts) with the "
+                "same time/treatment layout as the reproduction data")
+
+        _, Sval = self._parse_raw_table(survtable, "survtable")
+        Rval = self.dataarray
+        if Sval.shape != Rval.shape:
+            raise ValueError("The survtable and the reproduction data must be equally sized")
+        ntreats, ntime = Rval.shape
+
+        if femaletable is None:
+            # no female counts given: assume number of females is a fixed
+            # fraction of the survivors, at every time point
+            Fnew = Sval * sexratio
+        else:
+            Ftime, Fval = self._parse_raw_table(femaletable, "femaletable")
+            Fnew = np.full((ntreats, ntime), np.nan)
+            for j, ft in enumerate(Ftime):
+                idx = np.where(self.time == ft)[0]
+                if idx.size == 0:
+                    raise ValueError(
+                        "Time points in femaletable must be a subset of the "
+                        "reproduction data time points")
+                Fnew[:, idx[0]] = Fval[:, j]
+
+            for i in range(ntreats):
+                ind_sex = np.where(~np.isnan(Fnew[i, :]))[0]
+                if ind_sex.size != 1:
+                    raise ValueError(
+                        "Need 1 (and no more than 1) observation on the number "
+                        "of females, per replicate")
+                k = ind_sex[0]
+                # propagate the observed number of females back to the earlier
+                # time points (before sex could be determined)
+                Fnew[i, :k] = Fnew[i, k]
+                if np.isnan(Sval[i, :k]).any():
+                    raise ValueError(
+                        "There can (for now) not be NaNs in the survivor matrix "
+                        "before the sex determination")
+
+            # account for the (assumed) females among the animals that died:
+            # add back, at each time point, the females estimated to have
+            # died from that point onward
+            F_dead = sexratio * (-np.diff(Sval, axis=1))
+            F_dead = np.hstack([F_dead, np.zeros((ntreats, 1))])
+            F_dead[np.isnan(F_dead)] = 0
+            F_dead = np.cumsum(F_dead[:, ::-1], axis=1)[:, ::-1]
+            Fnew = Fnew + F_dead
+
+        # account for deaths of females within an interval: the observed
+        # offspring have been produced by the average number of females
+        # alive during that interval
+        Fnew_avg = np.copy(Fnew)
+        Fnew_avg[:, 1:] = (Fnew[:, 1:] + Fnew[:, :-1]) / 2
+        Fnew = Fnew_avg
+
+        self.weights = Fnew
+        self.dataarray_cumulative = np.cumsum(Rval / Fnew, axis=1)
 
 
     def plot_data(self, dataarray=None, label="Individual reproduction", wmeans=False):

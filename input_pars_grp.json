@@ -1,0 +1,31 @@
+{
+    "global_parameters": {
+        "FBV": 0.02,
+        "KRV": 1.0,
+        "kap": 0.8,
+        "yP": 0.64,
+        "LM_ref": 5.0
+    },
+    "physiological_model": {
+        "L0": {"value": 0.88,    "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
+        "Lp": {"value": 1.7982,  "fixed": false, "islog": false, "min": 1.0, "max": 5},
+        "Lm": {"value": 3.1175,  "fixed": false, "islog": false, "min": 1.0, "max": 10.0},
+        "rB": {"value": 0.14241, "fixed": false, "islog": false, "min": 0.002, "max": 0.3},
+        "Rm": {"value": 1.062,  "fixed": false, "islog": false, "min": 1.0, "max": 20.0},
+        "f":  {"value": 1.0,     "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
+        "hb": {"value": 0.0048,  "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
+        "a":  {"value": 1.0,     "fixed": true, "islog": false, "min": 0.0, "max": 10.0}
+    },
+    "special_cases": {
+        "Lf": {"value": 0.0,   "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
+        "Lj": {"value": 0.0,   "fixed": true, "islog": false, "min": 0.0, "max": 10.0},
+        "Tlag": {"value": 0.0, "fixed": true, "islog": false, "min": 0.0, "max": 10.0}
+    },
+    "tox_parameters": {
+        "kd": {"value": -1.5, "fixed": false, "islog": true, "min": 0.01, "max": 10.0},
+        "bb": {"value": 1.3, "fixed": false, "islog": true, "min": 0.01, "max": 1.0},
+        "zb": {"value": -1.3, "fixed": false, "islog": true, "min": 0.0, "max": 1.0},
+        "bs": {"value": 0.1, "fixed": false, "islog": true, "min": 0.01, "max": 1.0},
+        "zs": {"value": 0.1, "fixed": false, "islog": true, "min": 0.0, "max": 1.0}
+    }
+}
