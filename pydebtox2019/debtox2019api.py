@@ -127,14 +127,16 @@ def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0, wmeans=F
 def get_survival_data(model, modelsolcontainer, nd):
 
     ntreats = model.concstruct_list[nd].ntreats
+    struct = model.survstruct_list[nd]
 
+    mask = np.isin(model.timeext[nd], struct.time)
     modelvals = np.array([
-        modelsolcontainer[nd][i][3]
+        modelsolcontainer[nd][i][3][mask]
         for i in range(ntreats)
     ])
 
-    datavals = model.survstruct_list[nd].survprobstreat
-    counts = model.survstruct_list[nd].survarrtreat
+    datavals = struct.survprobstreat
+    counts = struct.survarrtreat
 
     return modelvals, datavals, counts
 
@@ -383,35 +385,116 @@ def efsa_criteria(model):
             print(f"Global NRMSE {endpoint_names[endpoint]}: {nrmse}\n")
     #return modelsolcontainer
 
-def validation(full_ds, debparameterclass, parspace_tox, CI=True, multicore=True,wmeans=False):
+def validation(full_ds, debparameterclass, parspace_tox, CI=True, multicore=True, wmeans=False):
     """
-    Validation for a new dataset using the parameters obtained from a previous calibration.
-    This function should be called only after the physiological model for the new dataset has
-    been refitted.
+    Validation for a new dataset using the toxicity parameters obtained from a
+    previous calibration.
+
+    This function should be called only after the physiological model for the
+    new dataset has already been refitted (i.e. debparameterclass already
+    carries the refit physiological parameter values). The toxicity
+    parameters are then overwritten with the values found in the previous
+    parspace_tox calibration and held fixed at those values, with physiology
+    frozen at its own point estimate. Only the *toxicity*-parameter
+    uncertainty from parspace_tox is propagated into the validation CI/EFSA
+    metrics - physiological parameters carry no uncertainty band here, since
+    they are not re-explored on the new dataset.
+
+    Parameters are matched between parspace_tox and debparameterclass by base
+    name (e.g. "kd"), not by full expanded name, since the two may use
+    different dataset/group suffixes (or none at all).
+
     Arguments:
     - full_ds: the full dataset for the new data (including controls)
     - debparameterclass: the DEBparameters instance containing the parameters relative to the new dataset
     - parspace_tox: the PyParspace instance from the previous calibration of the toxicity parameters
     """
-    # refit physiological model to new data
-    debparameterclass.fixfree_tox_pars(isfree=False) # to make sure tox paramters remain fixed
-    # copy the tox parameters from the parspace_tox to the debparameterclass.
-    changedpars = parspace_tox.model.parvals[parspace_tox.model.isfree]
-    namechangedpars = parspace_tox.model.parnames[parspace_tox.model.isfree]
-    for name, val in zip(namechangedpars, changedpars):
-        print("Updating parameter %s to value %f from the calibration"%(name,val))
-        debparameterclass.full_list[debparameterclass.full_names == name] = val
+    tox_model = parspace_tox.model
+    tox_base_names = tox_model.full_base_names[parspace_tox.posfree]
+    tox_islog = tox_model.islog[parspace_tox.posfree]
+    tox_values = tox_model.parvals[parspace_tox.posfree]
+
+    uniq, counts = np.unique(tox_base_names, return_counts=True)
+    dupes = uniq[counts > 1]
+    if dupes.size > 0:
+        raise ValueError(
+            "validation() cannot resolve a single calibrated value for "
+            "parameter(s) %s: parspace_tox fitted more than one "
+            "(grouped/dataset-specific) instance of it. Resolve which value "
+            "to carry forward before calling validation()." % ", ".join(dupes)
+        )
+
+    # Fix all tox parameters, then overwrite their central values and free
+    # exactly the ones that were free in the calibration - matched by base
+    # name, since the new dataset's expanded names need not use the same
+    # group/dataset suffixes as the calibration.
+    debparameterclass.fixfree_tox_pars(isfree=False)
+    for base_name, islog_src, val in zip(tox_base_names, tox_islog, tox_values):
+        mask = debparameterclass.full_base_names == base_name
+        if not np.any(mask):
+            raise ValueError(
+                "Calibrated toxicity parameter '%s' not found in the new "
+                "dataset's parameter set." % base_name
+            )
+        if mask.sum() > 1:
+            raise ValueError(
+                "Toxicity parameter '%s' expands to more than one instance "
+                "in the new dataset's parameter set; validation() expects a "
+                "single dataset with one instance per parameter." % base_name
+            )
+        if debparameterclass.full_islog[mask][0] != islog_src:
+            raise ValueError(
+                "Parameter '%s' is log-scaled in parspace_tox but not in "
+                "the new dataset's parameter set (or vice versa); cannot "
+                "safely transfer its calibrated value." % base_name
+            )
+        print("Updating parameter %s to value %f from the calibration" % (base_name, val))
+        debparameterclass.full_list[mask] = val
+
     debparameterclass.set_fixfree_all(isfree=False)
-    debparameterclass.set_freefix_parameters_list(namechangedpars, isfree=True)
+    debparameterclass.set_freefix_parameters_list(tox_base_names, isfree=True)
+
     debmodeltest = mm.DEBtox2019models([full_ds],
                                        debparameterclass,
                                        parspace_tox.model.moa,
                                        parspace_tox.model.feedb,
-                                       parspace_tox.model.Tbp,solver='LSODA')
-    physioparspace = ps.PyParspace(ps.SettingParspace(0,1), debmodeltest)
-    # copy the propagation set into the new instance of parspace.
-    physioparspace.propagationset = parspace_tox.propagationset # DANGER!!! NEEDS TESTING!!
-    plot_DEBresults(physioparspace,CI=CI,multicore=multicore,wmeans=wmeans)
+                                       parspace_tox.model.Tbp, solver='LSODA')
+    physioparspace = ps.PyParspace(ps.SettingParspace(0, 1), debmodeltest)
+
+    # Remap the calibration's propagation set onto the new dataset's
+    # parameter order by base name, rather than assuming the two parameter
+    # sets share the same column order (or even the same suffix scheme).
+    dst_base_names = physioparspace.model.full_base_names[physioparspace.posfree]
+    dst_islog = physioparspace.model.islog[physioparspace.posfree]
+
+    uniq_dst, counts_dst = np.unique(dst_base_names, return_counts=True)
+    dupes_dst = uniq_dst[counts_dst > 1]
+    if dupes_dst.size > 0:
+        raise ValueError(
+            "The new dataset's parameter set expands parameter(s) %s into "
+            "more than one free instance; validation() expects a single "
+            "dataset with one instance per toxicity parameter."
+            % ", ".join(dupes_dst)
+        )
+
+    name_to_src_col = {name: j for j, name in enumerate(tox_base_names)}
+    perm = np.empty(len(dst_base_names), dtype=int)
+    for k, name in enumerate(dst_base_names):
+        if name not in name_to_src_col:
+            raise ValueError(
+                "Free parameter '%s' in the new dataset has no matching "
+                "calibrated toxicity parameter in parspace_tox." % name
+            )
+        j = name_to_src_col[name]
+        if dst_islog[k] != tox_islog[j]:
+            raise ValueError(
+                "Parameter '%s' is log-scaled in one parameter set but not "
+                "the other; cannot safely remap the propagation set." % name
+            )
+        perm[k] = j
+    physioparspace.propagationset = parspace_tox.propagationset[:, perm]
+
+    plot_DEBresults(physioparspace, CI=CI, multicore=multicore, wmeans=wmeans)
     efsa_criteria(physioparspace.model)
 
 

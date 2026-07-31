@@ -454,6 +454,7 @@ class lengthdataclass(dataclass):
         for i in range(self.ntreats):
             tmplength = self.dataarray[i, np.isnan(self.dataarray[i])==False]
             self.lengthtreat.append(tmplength)
+        self.calc_mean_and_ci()
 
     def plot_data(self, dataarray=None, label="Length [cm]", wmeans=False):
         return super().plot_data(dataarray=dataarray, label=label, wmeans=wmeans)
@@ -487,6 +488,8 @@ class reproclass(dataclass):
         self.flatdataclean, self.flatweightsclean, self.indfintable = self.flatten_and_clean(self.dataarray_cumulative, self.weights)
         # to be used in the fitting
         #self.reproweights = np.ones_like(self.dataarray) # ported in parent class
+        if self.dataarray_cumulative is not None:
+            self.calc_mean_and_ci(self.dataarray_cumulative)
 
     def makerepro_ind(self, optcase):
         # optcase can be 0, 1, 2, 3
