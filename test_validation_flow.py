@@ -153,7 +153,7 @@ if __name__ == "__main__":
     #    R2/NRMSE criteria.
     # ------------------------------------------------------------------
     dt2019.validation(
-        full_ds_val, debparameters_val, parspace_tox, CI=True, multicore=False, wmeans=False
+        full_ds_val, debparameters_val, parspace_tox, CI=True, multicore=True, wmeans=False
     )
 
     # ------------------------------------------------------------------

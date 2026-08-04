@@ -42,85 +42,92 @@ def plot_DEBresults_ds(parspaceres, CI=True, multicore=True, dataset=0, wmeans=F
     # print("number of endpoints to plot: ", lenendpoints)
     # print("number of treatments to plot: ", len(treatmentnames))
     ax = fig.subplots(lenendpoints,len(treatmentnames),squeeze=False)
-    for i in range(len(treatmentnames)):
-        # print("i: ", i)
-        # print("treatment: ", treatmentnames[i])
-        sol.append(parspaceres.model.calc_model(parspaceres.model.concstruct_list[dataset].concarraytr[i],
-                                      parspaceres.model.concstruct_list[dataset].timetr,
-                                      modelpars,
-                                      parspaceres.model.moa,
-                                      parspaceres.model.feedb,
-                                      tevals))
-        if CI:
-            solci=np.zeros((len(parspaceres.propagationset),len(tevals),4))                
-            # ---- prepare constant arguments
-            parvals   = parspaceres.model.parvals
-            posfree   = parspaceres.posfree
-            concarray = parspaceres.model.concstruct_list[dataset].concarraytr[i]
-            time      = parspaceres.model.concstruct_list[dataset].timetr
-            islog     = parspaceres.model.islog
-            moa       = parspaceres.model.moa
-            feedb     = parspaceres.model.feedb
-            # ---- build starmap argument list
-            args = [(pars, parvals, posfree, concarray, time, islog, moa, feedb, tevals,dataset) for pars in parspaceres.propagationset]
-            # ---- run in parallel
-            if multicore:
-                with mp.Pool(n_cores) as pool:
+    # create the worker pool once (only if it will actually be used), and
+    # reuse it across all treatments instead of spinning one up per treatment
+    pool = mp.Pool(n_cores) if (multicore and CI) else None
+    try:
+        for i in range(len(treatmentnames)):
+            # print("i: ", i)
+            # print("treatment: ", treatmentnames[i])
+            sol.append(parspaceres.model.calc_model(parspaceres.model.concstruct_list[dataset].concarraytr[i],
+                                          parspaceres.model.concstruct_list[dataset].timetr,
+                                          modelpars,
+                                          parspaceres.model.moa,
+                                          parspaceres.model.feedb,
+                                          tevals))
+            if CI:
+                solci=np.zeros((len(parspaceres.propagationset),len(tevals),4))
+                # ---- prepare constant arguments
+                parvals   = parspaceres.model.parvals
+                posfree   = parspaceres.posfree
+                concarray = parspaceres.model.concstruct_list[dataset].concarraytr[i]
+                time      = parspaceres.model.concstruct_list[dataset].timetr
+                islog     = parspaceres.model.islog
+                moa       = parspaceres.model.moa
+                feedb     = parspaceres.model.feedb
+                # ---- build starmap argument list
+                args = [(pars, parvals, posfree, concarray, time, islog, moa, feedb, tevals,dataset) for pars in parspaceres.propagationset]
+                # ---- run in parallel
+                if pool is not None:
                     results = pool.starmap(parspaceres.model.worker_DEBresults, args)
+                else:
+                    results = [parspaceres.model.worker_DEBresults(*arg) for arg in args]
+                # ---- fill output array
+                solci[:] = results
+                # find max and min for each time point
+                low = solci.min(axis=0)
+                upp = solci.max(axis=0)
+            ### concentration and damage plot
+            ax[0,i].plot(ccl.timetr,ccl.concarraytr[i])
+            ax[0,i].plot(tevals,sol[i][0])
+            ax[0,i].set_title('T %s'%(treatmentnames[i]))
+            if CI:
+                ax[0,i].fill_between(tevals, low[:,0], upp[:,0], color='gray', alpha=0.5)
+            if (ccl.concarray==0).all():
+                ax[0,i].set_ylim(0.0,1.1)
             else:
-                results = [parspaceres.model.worker_DEBresults(*arg) for arg in args]
-            # ---- fill output array
-            solci[:] = results
-            # find max and min for each time point
-            low = solci.min(axis=0)
-            upp = solci.max(axis=0)
-        ### concentration and damage plot
-        ax[0,i].plot(ccl.timetr,ccl.concarraytr[i])
-        ax[0,i].plot(tevals,sol[i][0])
-        ax[0,i].set_title('T %s'%(treatmentnames[i]))
-        if CI:
-            ax[0,i].fill_between(tevals, low[:,0], upp[:,0], color='gray', alpha=0.5)
-        if (ccl.concarray==0).all():
-            ax[0,i].set_ylim(0.0,1.1)
-        else:
-            ax[0,i].set_ylim(0,ccl.concarray.max()*1.1)
-        if i == 0:
-            ax[0,i].set_ylabel("Concentration (%s)"%(ccl.concunits))
-        k=1 # mark endpoint
-        ### lengths
-        if lcl is not None:
-            lcl.add_plotdata(ax[k,i],treatmentnames[i],wmeans=wmeans)
-            ax[k,i].plot(tevals,sol[0][1],'k--')
-            ax[k,i].plot(tevals,sol[i][1])
-            ax[k,i].set_ylim(0,np.nanmax(lcl.dataarray)*1.1)
-            if CI:
-                ax[k,i].fill_between(tevals, low[:,1], upp[:,1], color='gray', alpha=0.5)
+                ax[0,i].set_ylim(0,ccl.concarray.max()*1.1)
             if i == 0:
-                ax[k,i].set_ylabel("Length (mm)")
-            k+=1
-        ### reproduction
-        if rcl is not None:
-            rcl.add_plotdata(ax[k,i],treatmentnames[i],wmeans=wmeans)
-            ax[k,i].plot(tevals,sol[0][2],'k--')
-            ax[k,i].plot(tevals,sol[i][2])
-            ax[k,i].set_ylim(0,np.nanmax(rcl.dataarray_cumulative)*1.1)
-            if CI:
-                ax[k,i].fill_between(tevals, low[:,2], upp[:,2], color='gray', alpha=0.5)
-            if i == 0:
-                ax[2,i].set_ylabel("Reproduction (#/female)")
-            k+=1
-        ### survival
-        if scl is not None:
-            scl.add_plotdata(ax[k,i],ntreat=treatmentnames[i], scaleto1=True,wmeans=wmeans)
-            ax[k,i].plot(tevals,sol[0][3], 'k--')
-            ax[k,i].plot(tevals,sol[i][3])
-            ax[k,i].set_ylim([0,1.1])
-            if CI:
-                ax[k,i].fill_between(tevals, low[:,3], upp[:,3], color='gray', alpha=0.5)
-            #ax[k,i].set_xlabel("Time (d)")
-            if i == 0:
-                ax[k,i].set_ylabel("Survival fraction")
-        ax[lenendpoints-1,i].set_xlabel("Time (d)") # add the xlabel only to the last row of plots
+                ax[0,i].set_ylabel("Concentration (%s)"%(ccl.concunits))
+            k=1 # mark endpoint
+            ### lengths
+            if lcl is not None:
+                lcl.add_plotdata(ax[k,i],treatmentnames[i],wmeans=wmeans)
+                ax[k,i].plot(tevals,sol[0][1],'k--')
+                ax[k,i].plot(tevals,sol[i][1])
+                ax[k,i].set_ylim(0,np.nanmax(lcl.dataarray)*1.1)
+                if CI:
+                    ax[k,i].fill_between(tevals, low[:,1], upp[:,1], color='gray', alpha=0.5)
+                if i == 0:
+                    ax[k,i].set_ylabel("Length (mm)")
+                k+=1
+            ### reproduction
+            if rcl is not None:
+                rcl.add_plotdata(ax[k,i],treatmentnames[i],wmeans=wmeans)
+                ax[k,i].plot(tevals,sol[0][2],'k--')
+                ax[k,i].plot(tevals,sol[i][2])
+                ax[k,i].set_ylim(0,np.nanmax(rcl.dataarray_cumulative)*1.1)
+                if CI:
+                    ax[k,i].fill_between(tevals, low[:,2], upp[:,2], color='gray', alpha=0.5)
+                if i == 0:
+                    ax[2,i].set_ylabel("Reproduction (#/female)")
+                k+=1
+            ### survival
+            if scl is not None:
+                scl.add_plotdata(ax[k,i],ntreat=treatmentnames[i], scaleto1=True,wmeans=wmeans)
+                ax[k,i].plot(tevals,sol[0][3], 'k--')
+                ax[k,i].plot(tevals,sol[i][3])
+                ax[k,i].set_ylim([0,1.1])
+                if CI:
+                    ax[k,i].fill_between(tevals, low[:,3], upp[:,3], color='gray', alpha=0.5)
+                #ax[k,i].set_xlabel("Time (d)")
+                if i == 0:
+                    ax[k,i].set_ylabel("Survival fraction")
+            ax[lenendpoints-1,i].set_xlabel("Time (d)") # add the xlabel only to the last row of plots
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
     plt.tight_layout()
 
 
@@ -156,14 +163,14 @@ def calc_r2_nrmse(data, model):
 
 def get_endpoint_data(model, modelsolcontainer, nd, endpoint):
     ntreats = model.concstruct_list[nd].ntreats
-    if endpoint == 1:
-        struct = model.lengthstruct_list[nd]
-        state_idx = 1
-    elif endpoint == 2:
-        struct = model.reprostruct_list[nd]
-        state_idx = 2
-    else:
+    spec = mm.ENDPOINTS.get(endpoint)
+    if endpoint == 0 or spec is None:
+        # survival is handled separately by get_survival_data (it needs
+        # counts/probabilities, not a plain mean); anything else is not a
+        # recognized endpoint code
         raise ValueError(endpoint)
+    struct = getattr(model, spec.struct_list_attr)[nd]
+    state_idx = spec.state_idx
     mask = np.isin(model.timeext[nd], struct.time)
     modelvals = np.array([
         modelsolcontainer[nd][i][state_idx][mask]
@@ -244,11 +251,7 @@ def efsa_criteria(model):
     basepars = model.parvals.copy()
     basepars[model.islog] = 10 ** basepars[model.islog]
 
-    endpoint_names = {
-        0: "survival",
-        1: "length",
-        2: "reproduction"
-    }
+    endpoint_names = {code: spec.name for code, spec in mm.ENDPOINTS.items()}
 
     modelsolcontainer = [None] * model.ndatasets
 
@@ -492,7 +495,9 @@ def validation(full_ds, debparameterclass, parspace_tox, CI=True, multicore=True
                 "the other; cannot safely remap the propagation set." % name
             )
         perm[k] = j
-    physioparspace.propagationset = parspace_tox.propagationset[:, perm]
+    if CI:
+        # this is relevant only if we want to show the confidence intervals
+        physioparspace.propagationset = parspace_tox.propagationset[:, perm]
 
     plot_DEBresults(physioparspace, CI=CI, multicore=multicore, wmeans=wmeans)
     efsa_criteria(physioparspace.model)
@@ -905,9 +910,6 @@ def calc_ecx(
         results[endpoint_name][x] -> np.ndarray of ECx/LCx values aligned with Tend.
         If ci=True, also results[endpoint_name]['{x}_lo'] / '{x}_up'.
     """
-    ENDPOINT_NAMES = {0: 'survival', 1: 'length', 2: 'reproduction'}
-    NAME_TO_CODE = {v: k for k, v in ENDPOINT_NAMES.items()}
-
     Tend_arr = np.atleast_1d(np.asarray(Tend, dtype=float))
     X = tuple(X)
 
@@ -917,7 +919,7 @@ def calc_ecx(
         if isinstance(endpoints, (str, int, np.integer)):
             endpoints = (endpoints,)  # allow a single endpoint, e.g. endpoints='reproduction'
         endpoint_codes = tuple(
-            ep if isinstance(ep, (int, np.integer)) else NAME_TO_CODE[ep]
+            ep if isinstance(ep, (int, np.integer)) else mm.NAME_TO_CODE[ep]
             for ep in endpoints
         )
 
@@ -934,7 +936,7 @@ def calc_ecx(
     core = model.calc_ecx_core(modelpars, Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol,
                                 plateau_tol=plateau_tol)
 
-    results = {ENDPOINT_NAMES[ep]: core[ep] for ep in endpoint_codes}
+    results = {mm.ENDPOINTS[ep].name: core[ep] for ep in endpoint_codes}
     results['time'] = Tend_arr
 
     if ci:
@@ -954,7 +956,7 @@ def calc_ecx(
             allruns = [model.worker_ecx(*arg) for arg in args]
 
         for ep in endpoint_codes:
-            name = ENDPOINT_NAMES[ep]
+            name = mm.ENDPOINTS[ep].name
             for x in X:
                 stacked = np.vstack([run[ep][x] for run in allruns])
                 results[name]['%s_lo' % x] = np.nanmin(stacked, axis=0)
@@ -962,8 +964,8 @@ def calc_ecx(
 
     if verbose:
         for ep in endpoint_codes:
-            name = ENDPOINT_NAMES[ep]
-            label = 'LCx' if ep == 0 else 'ECx'
+            name = mm.ENDPOINTS[ep].name
+            label = 'LCx' if mm.ENDPOINTS[ep].is_survival else 'ECx'
             print(f"\n{label} for endpoint '{name}' (dataset {dataset}):")
             header = "Time".ljust(10) + "".join(("%s%%" % x).ljust(14) for x in X)
             print(header)
@@ -1278,9 +1280,6 @@ def calc_epx(
         If ci=True, also results[endpoint_name]['{x}_lo'] / '{x}_up'
         (CI bounds on the EPx/LPx value only).
     """
-    ENDPOINT_NAMES = {0: 'survival', 1: 'length', 2: 'reproduction'}
-    NAME_TO_CODE = {v: k for k, v in ENDPOINT_NAMES.items()}
-
     exposure_time, exposure_conc = _resolve_exposure_profile(exposure)
     Twin_arr = np.atleast_1d(np.asarray(Twin, dtype=float))
     X = tuple(X)
@@ -1291,7 +1290,7 @@ def calc_epx(
         if isinstance(endpoints, (str, int, np.integer)):
             endpoints = (endpoints,)  # allow a single endpoint, e.g. endpoints='reproduction'
         endpoint_codes = tuple(
-            ep if isinstance(ep, (int, np.integer)) else NAME_TO_CODE[ep]
+            ep if isinstance(ep, (int, np.integer)) else mm.NAME_TO_CODE[ep]
             for ep in endpoints
         )
 
@@ -1306,7 +1305,7 @@ def calc_epx(
 
     results = {}
     for ep in endpoint_codes:
-        name = ENDPOINT_NAMES[ep]
+        name = mm.ENDPOINTS[ep].name
         results[name] = {}
         for x in X:
             results[name][x] = core[ep][x]['value']
@@ -1334,7 +1333,7 @@ def calc_epx(
             allruns = [model.worker_epx(*arg) for arg in args]
 
         for ep in endpoint_codes:
-            name = ENDPOINT_NAMES[ep]
+            name = mm.ENDPOINTS[ep].name
             for x in X:
                 stacked = np.vstack([run[ep][x]['value'] for run in allruns])
                 results[name]['%s_lo' % x] = np.nanmin(stacked, axis=0)
@@ -1342,8 +1341,8 @@ def calc_epx(
 
     if verbose:
         for ep in endpoint_codes:
-            name = ENDPOINT_NAMES[ep]
-            label = 'LPx' if ep == 0 else 'EPx'
+            name = mm.ENDPOINTS[ep].name
+            label = 'LPx' if mm.ENDPOINTS[ep].is_survival else 'EPx'
             print(f"\n{label} for endpoint '{name}' (dataset {dataset}):")
             header = "Window".ljust(10) + "".join(("%s%%" % x).ljust(14) for x in X)
             print(header)
@@ -1405,11 +1404,9 @@ def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_inde
     -------
     (fig_mf, fig_window) : the two matplotlib Figure objects.
     """
-    ENDPOINT_STATE_IDX = {0: 3, 1: 1, 2: 2}
-    NAME_TO_CODE = {'survival': 0, 'length': 1, 'reproduction': 2}
-    ep_code = NAME_TO_CODE[endpoint]
-    si = ENDPOINT_STATE_IDX[ep_code]
-    label = 'LPx' if ep_code == 0 else 'EPx'
+    ep_code = mm.NAME_TO_CODE[endpoint]
+    si = mm.ENDPOINTS[ep_code].state_idx
+    label = 'LPx' if mm.ENDPOINTS[ep_code].is_survival else 'EPx'
 
     exposure_time, exposure_conc = _resolve_exposure_profile(exposure)
 

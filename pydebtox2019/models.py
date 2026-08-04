@@ -1,4 +1,5 @@
 import numpy as np
+from dataclasses import dataclass
 from numba import jit
 from scipy.integrate import odeint,solve_ivp
 from scipy.optimize import brentq
@@ -6,9 +7,79 @@ import multiprocessing as mp
 import psutil
 n_cores = psutil.cpu_count(logical=False) # to have the number of physical cores only
 
+
+@dataclass(frozen=True)
+class EndpointSpec:
+    """
+    Everything the rest of the package needs to know about one observable
+    endpoint, in one place, so it doesn't have to be re-declared (and kept
+    in sync by hand) everywhere an endpoint is referenced by code.
+
+    Attributes:
+    - code: the integer endpoint code used throughout the package (in
+      active_endpoints, calc_ecx/calc_epx's `endpoints=` argument, etc.)
+    - name: display/lookup name, e.g. 'length'
+    - state_idx: row in the array returned by calc_model that this
+      endpoint reads. NOTE this is *not* the same numbering as `code` -
+      e.g. survival is code 0 but state row 3 - which is exactly why this
+      needs to be an explicit, named mapping rather than an assumption.
+    - dataset_attr: attribute name on a `completedataset` instance that
+      signals this endpoint is present (e.g. 'lengthdata'); also the key
+      used in `completedataset.time_indices` for this endpoint.
+    - struct_list_attr: attribute name on `DEBtox2019models` holding the
+      per-dataset list of this endpoint's data structure (e.g.
+      'lengthstruct_list').
+    - indexcommon_attr: attribute name on `DEBtox2019models` holding the
+      per-dataset list of this endpoint's common-time indices (e.g.
+      'indexcommon_length').
+    - is_survival: True only for the survival endpoint - used where
+      survival needs different handling from the other (continuous)
+      endpoints, e.g. LCx/LPx vs ECx/EPx labeling.
+    """
+    code: int
+    name: str
+    state_idx: int
+    dataset_attr: str
+    struct_list_attr: str
+    indexcommon_attr: str
+    is_survival: bool = False
+
+
+# Declared in the same order the pre-registry code used to append to
+# active_endpoints (length, reproduction, survival) so that ordering -
+# e.g. the order endpoints are summed in log_likelihood, or printed in
+# efsa_criteria - is unchanged by this being a loop over a dict now.
+ENDPOINTS = {
+    1: EndpointSpec(1, 'length', state_idx=1, dataset_attr='lengthdata',
+                     struct_list_attr='lengthstruct_list', indexcommon_attr='indexcommon_length'),
+    2: EndpointSpec(2, 'reproduction', state_idx=2, dataset_attr='reprodata',
+                     struct_list_attr='reprostruct_list', indexcommon_attr='indexcommon_repro'),
+    0: EndpointSpec(0, 'survival', state_idx=3, dataset_attr='survdata',
+                     struct_list_attr='survstruct_list', indexcommon_attr='indexcommon_surv',
+                     is_survival=True),
+}
+NAME_TO_CODE = {spec.name: code for code, spec in ENDPOINTS.items()}
+
+
+class DEBSolverError(Exception):
+    """
+    Raised by calc_DEBresults when the ODE solver (solve_ivp/odeint) fails
+    to produce a usable trajectory for the requested time grid - e.g. it
+    did not converge, bailed out early leaving a truncated result, or
+    produced non-finite values.
+
+    This is deliberately the *only* failure this module signals as "the
+    model could not be evaluated for this parameter point" (callers such
+    as log_likelihood catch specifically this type and return an infinite
+    penalty). Any other exception raised while solving indicates a real
+    bug (bad arguments, a shape mismatch, a typo'd solver name, ...) and
+    is left to propagate normally instead of being silently swallowed.
+    """
+    pass
+
+
 @jit(nopython=True, cache=True)
-def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
-#def DEBtox2019_derivatives(y, t, C, timextr, DEBpars, moa, feedb):
+def _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb):
     # y0 damage
     # y1 length
     # y2 reproduction
@@ -31,7 +102,7 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
 
     hazard = min(hazard, 111.) # avoid stiffness
     sMOA = moa * stress
-    sMOA[0] = min(sMOA[0],1) 
+    sMOA[0] = min(sMOA[0],1)
     sA,sM,sG,sR,sH = sMOA
     dydt[1] = rB * ((1+sM)/(1+sG)) * (f*Lm*((1-sA)/(1+sM)) - y[1])  # ODE for body length
     # introduce starvation rules
@@ -43,7 +114,7 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
         else:
             fR = 0
             dydt[1] = (rB*(1+sM)/yP) * ((f*Lm/kap)*((1-sA)/(1+sM)) - y[1]) # allow some shrinking
-        
+
     R = 0  # reproduction is 0, unless...
     if (y[1]>=Lp):
         R = max(0.,(np.exp(-sH)*Rm/(1+sR)) * (fR*Lm*(y[1]*y[1])*(1-sA) - (Lp*Lp*Lp)*(1+sM))/(Lm*Lm*Lm - Lp*Lp*Lp))
@@ -61,7 +132,7 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
 
     if (y[1] <= 0.5 * L0): # if an animal has size less than half the start size ...
         dydt[1] = 0.  # don't let it grow or shrink any further (to avoid numerical issues)
-            
+
     if (t<Tlag):
         # derivatives are non-zero only if time is greater than Tlag
         dydt[0] = 0
@@ -70,70 +141,20 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
         dydt[3] = 0
 
     return(dydt)
+
 
 @jit(nopython=True, cache=True)
 def DEBtox2019_derivatives_odeint(y, t, C, timextr, DEBpars, moa, feedb):
-    # y0 damage
-    # y1 length
-    # y2 reproduction
-    # y3 survival
-    dydt = np.zeros(4)
+    # odeint calls its right-hand side as func(y, t, *args)
+    return _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb)
 
-    #unpack parameters
-    FBV, KRV, kap, yP, Lm_ref, L0, Lp, Lm, rB, Rm, f, hb, a, Lf, Lj, Tlag, kd, bb, zb, bs, zs = DEBpars
-    hb = a * hb**a * t**(a-1)  # age-dependent background hazard
-    Cval = np.interp(t, timextr,C)  #to be seen here how to deal with multiplication factors
 
-    y[1] = max(1e-3*L0,y[1])  # to avoid numerical issues with length = 0
-    if Lf>0:
-        f = f/(1+(Lf*Lf*Lf)/(y[1]+y[1]+y[1]))
-    if Lj>0:
-        f = f * min(1, y[1]/Lj)
-
-    stress = bb*max(y[0]-zb,0)
-    hazard = bs*max(y[0]-zs,0)
-
-    hazard = min(hazard, 111.) # avoid stiffness
-    sMOA = moa * stress
-    sMOA[0] = min(sMOA[0],1) 
-    sA,sM,sG,sR,sH = sMOA
-    dydt[1] = rB * ((1+sM)/(1+sG)) * (f*Lm*((1-sA)/(1+sM)) - y[1])  # ODE for body length
-    # introduce starvation rules
-    fR = f    # if there is no starvation, f for reproduction is the standard f
-    if (dydt[1]<0):
-        fR = (f - kap * (y[1]/Lm) * ((1+sM)/(1-sA)))/(1-kap)
-        if (fR >= 0):
-            dydt[1] = 0  # stop growth but no shrinking
-        else:
-            fR = 0
-            dydt[1] = (rB*(1+sM)/yP) * ((f*Lm/kap)*((1-sA)/(1+sM)) - y[1]) # allow some shrinking
-        
-    R = 0  # reproduction is 0, unless...
-    if (y[1]>=Lp):
-        R = max(0.,(np.exp(-sH)*Rm/(1+sR)) * (fR*Lm*(y[1]*y[1])*(1-sA) - (Lp*Lp*Lp)*(1+sM))/(Lm*Lm*Lm - Lp*Lp*Lp))
-    dydt[2] = R
-    dydt[3]  = -(hazard + hb) * y[3]
-
-    xu,xe,xG,xR = feedb * np.array([Lm_ref/y[1], Lm_ref/y[1], (3/y[1])*dydt[1], R*FBV*KRV])
-    if xu==0:
-        xu = 1
-    if xe==0:
-        xe = 1
-    xG = max(xG,0)
-
-    dydt[0] = kd * (xu * Cval - xe * y[0]) - (xG + xR) * y[0]
-
-    if (y[1] <= 0.5 * L0): # if an animal has size less than half the start size ...
-        dydt[1] = 0.  # don't let it grow or shrink any further (to avoid numerical issues)
-            
-    if (t<Tlag):
-        # derivatives are non-zero only if time is greater than Tlag
-        dydt[0] = 0
-        dydt[1] = 0
-        dydt[2] = 0
-        dydt[3] = 0
-
-    return(dydt)
+@jit(nopython=True, cache=True)
+def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
+    # solve_ivp calls its right-hand side as fun(t, y, *args) - the only
+    # difference from odeint's convention above, hence the thin wrapper
+    # instead of a second copy of the (identical) model physics.
+    return _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb)
 
 
 
@@ -143,14 +164,43 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
     # TODO: test if we need a very extended time vector or it will be enough to use the union of
     #       the time points of the experimental data (for speed reasons, given that rk45 should not care)
     #       in byom it seems to be enough to take the intersection of all the points in the datasets.
+    # A non-finite input (e.g. a NaN rate constant from a bad optimizer
+    # step) is not just an "eventually fails" case: a NaN right-hand side
+    # can make solve_ivp's adaptive step-size control spin forever (a NaN
+    # error estimate never satisfies its "step accepted" check, and never
+    # triggers its "step too small, give up" check either, since any
+    # comparison against NaN is False). Reject non-finite inputs up front,
+    # before ever calling the solver, rather than relying on the
+    # (occasionally non-terminating) solver to fail on its own.
+    if (not np.all(np.isfinite(DEBpars))) or (not np.all(np.isfinite(y0))):
+        raise DEBSolverError("calc_DEBresults received non-finite DEBpars or y0")
     if solver=="RK45":
         # solve_ivp has the possibility to choose a different algorithm (default is RK45)
-        sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0, 
+        sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
                     args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9)#, dense_output=True)
+        # solve_ivp does NOT raise on a failed integration: on failure it
+        # just sets sol.success=False and often returns a truncated sol.y
+        # (fewer columns than len(timeext)). Detect that explicitly here
+        # instead of letting some downstream indexing operation stumble
+        # into it by accident.
+        if (not sol.success) or (sol.y.shape[1] != len(timeext)) or (not np.all(np.isfinite(sol.y))):
+            raise DEBSolverError(
+                "solve_ivp failed to integrate the DEB model over the requested "
+                "time grid (message: %s)" % sol.message
+            )
         return(sol.y)
     elif solver=="LSODA":
     # odeint uses LSODA algorithm
         sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb), rtol=1e-9, atol=1e-9)
+        # odeint also does not raise on a failed integration: it prints an
+        # ODEPACK warning to stderr and still returns an array of the
+        # expected shape, just filled with non-finite/garbage values past
+        # the point of failure. Check explicitly for that too.
+        if (sol.shape != (len(timeext), len(y0))) or (not np.all(np.isfinite(sol))):
+            raise DEBSolverError(
+                "odeint failed to integrate the DEB model over the requested "
+                "time grid (non-finite or malformed result)"
+            )
         return(sol.T)
     else:
         raise ValueError("Solver not recognized. Use 'RK45' or 'LSODA'.")
@@ -195,41 +245,88 @@ def scaled_loglikelihood(model,lengths,weights,transf):
     return(llk)
 
 
-# @jit(nopython=True)
-# def repro_loglikelihood(modelvector, commontime, reproarray):
-#     return(0)
-
-
 class DEBtox2019models:
     '''
-    Class that contains the functions that are used to calculate the likelihood
-    of the GUTS model.
+    Container for one DEBtox2019 physiological + toxicokinetic-toxicodynamic
+    (TK-TD) model, set up against one or more experimental datasets. Provides
+    the ODE-solving, log-likelihood, and ECx/EPx machinery used by the
+    parameter-space explorer (parspace.PyParspace) and by the higher-level
+    helpers in debtox2019api.py.
+
+    Each dataset may contribute up to three observable endpoints - survival,
+    body length, and reproduction - alongside its exposure (concentration)
+    data. Which endpoints are present for a given dataset, and where their
+    data lives, is determined at construction time from the
+    `completedataset` instances passed in (see `active_endpoints` and the
+    `ENDPOINTS` registry near the top of this module).
 
     Attributes:
-    - variant: string that specifies the variant of the GUTS model (SD or IT)
-    - ndatasets: number of datasets
-    - concstruct: list of concentration data structures
-    - datastruct: list of survival data structures
-    - nbinsperday: number of bins per day
-    - timeext: extended time vector
-    - index_commontime: indices of the common time points between the concentration and survival data
-    - parnames: list of parameter names
-    - parvals: list of parameter values
-    - islog: list of booleans that specify if the parameter is log-transformed
-    - isfree: list of booleans that specify if the parameter is free
-    - posfree: indices of the free parameters
-    - parbound_lower: list of lower bounds for the parameters
-    - parbound_upper: list of upper bounds for the parameters
+    - debparameterclass: the DEBparameters instance the model was built
+      from (kept around for later reuse, e.g. by validation()).
+    - ndatasets: number of datasets.
+    - par_dataset_map: per-(expanded)-parameter ownership, from
+      debparameterclass.par_dataset_map (-1 for a shared parameter, or the
+      list of dataset indices a grouped/dataset-specific value belongs
+      to); used by build_dataset_parameters to resolve which value
+      applies to a given dataset.
+    - full_base_names: per-(expanded)-parameter base name (group/dataset
+      suffixes stripped), from debparameterclass.full_base_names.
+    - parnames: full expanded parameter names (object ndarray).
+    - parvals: full expanded parameter values. Log-transformed parameters
+      (see `islog`) are stored in log10-space.
+    - islog: bool ndarray, per parameter, whether it is log-transformed.
+    - isfree: bool ndarray, per parameter, whether it is free (vs fixed).
+    - posfree: int ndarray, indices of the free parameters into the
+      expanded arrays above.
+    - parbound_lower / parbound_upper: per-parameter bounds (log10-space
+      for log-transformed parameters).
+    - moa: length-5 mode-of-action array (assimilation, maintenance,
+      growth, reproduction, hazard).
+    - feedb: length-4 feedback array (see _DEBtox2019_derivatives_core).
+    - Tbp: brood-pouch/egg-development delay applied to reproduction (0 to
+      disable).
+    - min_t: minimum number of points for the dense internal solver time
+      grid built per dataset (see `newtimeext`).
+    - solver: 'RK45' (solve_ivp) or 'LSODA' (odeint).
+    - breaktime: if True, solve the ODE separately on each segment between
+      concentration time points - needed for some renewal/pulsed exposure
+      designs - instead of over the whole time span at once.
+    - timeext: list (one per dataset) of the union of that dataset's
+      active endpoints' observation times.
+    - newtimeext: list (one per dataset) of a denser time grid (built
+      from `min_t`), used internally when solving and then subsampled
+      back onto `timeext` - precomputed once here rather than on every
+      log_likelihood call.
+    - concstruct_list: list (one per dataset) of that dataset's
+      `concclass` exposure data.
+    - lengthstruct_list / reprostruct_list / survstruct_list: list (one
+      per dataset) of that dataset's `lengthdataclass` / `reproclass` /
+      `survdataclass` instance, or None where that endpoint isn't present.
+    - active_endpoints: list (one per dataset) of the endpoint codes
+      present for that dataset (see the ENDPOINTS registry).
+    - indexcommon_length / indexcommon_repro / indexcommon_surv: list
+      (one per dataset) of the indices locating that endpoint's own
+      observation times within `timeext[nd]`.
+    - endpoints: currently unused (set once, never read elsewhere in the
+      package) - likely a leftover from an earlier version; kept as-is
+      pending cleanup.
 
-    Methods:
-    - calc_ext_time: calculate the extended time vector and the indices of the common time points with the 
-                     original survival data	
-    - calc_damage: calculate the damage variable
-    - calc_survival: calculate the survival probability
-    - log_likelihood: calculate the log-likelihood of the GUTS model
+    Selected methods (see individual docstrings for details):
+    - build_dataset_parameters: collapse the expanded parameter vector
+      into the compact, dataset-specific vector calc_model expects.
+    - calc_model: run the ODE model for one dataset/treatment, including
+      the optional brood-pouch delay (Tbp) and breaktime handling.
+    - log_likelihood: the (negative) log-likelihood used by the
+      optimizer, combining survival, length and reproduction
+      contributions across all datasets.
+    - calc_ecx_core / calc_epx_core: numerical ECx/LCx and EPx/LPx
+      calculation (wrapped by debtox2019api.calc_ecx / calc_epx).
+    - worker_ecx / worker_epx / worker_DEBresults: picklable worker
+      functions used for multiprocessing-based confidence-interval
+      propagation.
     '''
-    def __init__(self, 
-                 completedataset_list, 
+    def __init__(self,
+                 completedataset_list,
                  debparameterclass,
                  moa, feedb,
                  Tbp = 0,
@@ -237,21 +334,32 @@ class DEBtox2019models:
                  solver ='LSODA',
                  breaktime = False):
         '''
-        Constructor for the GUTSmodels class. This class contains the
-        functions that are used to calculate the likelihood of the GUTS
-        model. The class is initialized with the following arguments:
+        Build a DEBtox2019models instance for one or more datasets.
 
         Arguments:
-          - completedataset_list: list of classes of complete datasets
-          - concstruct: list of concentration data structures (length depends on the number of datasets)
-          - variant: string that specifies the variant of the GUTS model (SD or IT)
-            - parnames: list of parameter names
-            - parvals: list of parameter values
-            - islog: list of booleans that specify if the parameter is log-transformed
-            - isfree: list of booleans that specify if the parameter is free
-            - parbound_lower: list of lower bounds for the parameters
-            - parbound_upper: list of upper bounds for the parameters
-            - min_t: 
+        - completedataset_list: list of `completedataset` instances (one
+          per dataset), each holding that dataset's exposure data and
+          whichever of survival/length/reproduction data it has.
+        - debparameterclass: a `DEBparameters` instance describing the
+          (expanded) parameter vector - values, bounds, log/free flags,
+          and the shared/grouped/dataset-specific ownership of each
+          parameter - to be used across all datasets in
+          completedataset_list.
+        - moa: length-5 mode-of-action array (assimilation, maintenance,
+          growth, reproduction, hazard).
+        - feedb: length-4 feedback array (see
+          _DEBtox2019_derivatives_core).
+        - Tbp: brood-pouch/egg-development delay applied to reproduction
+          (0 to disable). Default 0.
+        - min_t: minimum number of points for the dense internal solver
+          time grid built per dataset (see the `newtimeext` attribute).
+          Default 500.
+        - solver: 'RK45' (solve_ivp) or 'LSODA' (odeint). Default
+          'LSODA'.
+        - breaktime: if True, solve the ODE separately on each segment
+          between concentration time points, instead of over the whole
+          time span at once (needed for some renewal/pulsed exposure
+          designs). Default False.
         '''
         self.debparameterclass = debparameterclass
         self.ndatasets = len(completedataset_list)  # number of datasets
@@ -295,18 +403,11 @@ class DEBtox2019models:
             self.active_endpoints.append([])
             self.timeext.append(completedataset_list[i].complete_timevec) # complete extended time vector for the dataset
             self.concstruct_list[i] = completedataset_list[i].concdata
-            if hasattr(completedataset_list[i], 'lengthdata'):
-                self.lengthstruct_list[i] = completedataset_list[i].lengthdata
-                self.indexcommon_length[i] = completedataset_list[i].time_indices['lengthdata']
-                self.active_endpoints[i].append(1)
-            if hasattr(completedataset_list[i], 'reprodata'):
-                self.reprostruct_list[i] = completedataset_list[i].reprodata
-                self.indexcommon_repro[i] = completedataset_list[i].time_indices['reprodata']
-                self.active_endpoints[i].append(2)
-            if hasattr(completedataset_list[i], 'survdata'):
-                self.survstruct_list[i] = completedataset_list[i].survdata
-                self.indexcommon_surv[i] = completedataset_list[i].time_indices['survdata']
-                self.active_endpoints[i].append(0)
+            for code, spec in ENDPOINTS.items():
+                if hasattr(completedataset_list[i], spec.dataset_attr):
+                    getattr(self, spec.struct_list_attr)[i] = getattr(completedataset_list[i], spec.dataset_attr)
+                    getattr(self, spec.indexcommon_attr)[i] = completedataset_list[i].time_indices[spec.dataset_attr]
+                    self.active_endpoints[i].append(code)
             # this is because the more stuff are precalculated before likelihood evaluation, the better
             # makes the code faster
             newtime = self.timeext[i]
@@ -433,7 +534,7 @@ class DEBtox2019models:
         if not np.all(match_tbp):
             idx_tbp_in_union = np.array([np.where(newtime == t)[0][0] for t in tbp])
         # Extract the delayed state from union grid at tbp positions
-        REPRO_STATE_IDX = 2  # replace with a named constant or parameter if available
+        REPRO_STATE_IDX = ENDPOINTS[NAME_TO_CODE['reproduction']].state_idx
         delayed_values = modelsol_union[REPRO_STATE_IDX, idx_tbp_in_union]  # shape (len(tbp),)
         # Build the final model solution aligned to original timeext
         modelsol = modelsol_union[:, idx_timeext_in_union]  # shape (n_states, len(timeext))
@@ -465,9 +566,9 @@ class DEBtox2019models:
         return(modelsol)
 
     # State index (row in the array returned by calc_model) that each endpoint
-    # code refers to. Endpoint codes follow the convention used throughout this
-    # class (see active_endpoints): 0=survival, 1=length, 2=reproduction.
-    ENDPOINT_STATE_IDX = {0: 3, 1: 1, 2: 2}
+    # code refers to. Derived from the single ENDPOINTS registry (see above)
+    # rather than declared again here, so this and the registry can't drift.
+    ENDPOINT_STATE_IDX = {code: spec.state_idx for code, spec in ENDPOINTS.items()}
 
     def _bisect_log(self, f, low, high, max_expand=60, xtol=1e-8, increasing=False,
                      plateau_tol=1e-6):
@@ -892,93 +993,6 @@ class DEBtox2019models:
                                    Tstep, MF_bounds, max_expand, xtol,
                                    prune_win=prune_win, multicore=False,
                                    plateau_tol=plateau_tol)
-
-    # def worker_DEBresults(self,pars,parvals,posfree,concarray_i,
-    #                       time,islog,moa,feedb,tevals):
-    #     par95 = np.copy(parvals)
-    #     par95[posfree] = pars
-    #     transformed = np.where(islog, 10**par95, par95)
-    #     #transformed = 10**(par95)*islog + par95*(~islog)
-    #     return(self.calc_model(concarray_i,time,transformed,moa,feedb,tevals).T)
-
-    # def _calc_modelvalues(self):
-    #     # calculate the model points at exactly the time
-    #     # points of the experimental data
-    #     basepars = self.parvals.copy()
-    #     basepars[self.islog] = 10 ** basepars[self.islog]
-    #     modelsolcontainer = [None]*self.ndatasets
-    #     for nd in range(self.ndatasets):  # iterate over datasets
-    #         modelpars = self.build_dataset_parameters(basepars, nd)
-    #         fullmodelvector1 = np.array([])
-    #         fullmodelvector2 = np.array([])
-    #         fulllengthvector = np.array([])
-    #         fullreprovector = np.array([])
-    #         fullweightslengthvector = np.array([])
-    #         fullweightsreprovector = np.array([])
-    #         newtime = self.timeext[nd]
-    #         modelsoltreatlevel = np.full((4,len(newtime)),np.nan) 
-    #         # FIX this part for the brood pouch delay.
-    #         # CHECK if anything can be pre-computed
-    #         # tbp = 0 # make sure it is declared here
-    #         newtimeext = np.unique(np.concatenate((np.linspace(newtime[0],newtime[-1],max(self.min_t,len(newtime))),newtime)))
-    #         # print("newtimeext: ", newtimeext)
-    #         for i in range(self.concstruct_list[nd].ntreats):  # iterate over treatments within the dataset
-    #             try:
-    #                 modelsol = self.calc_model(self.concstruct_list[nd].concarraytr[i], self.concstruct_list[nd].timetr,
-    #                                            modelpars, self.moa, self.feedb,
-    #                                            newtimeext)
-    #             except:
-    #                 # there was a problem with the ODE solver
-    #                 return(np.inf)
-    #             idx_targets = np.searchsorted(newtimeext, self.timeext[nd])
-    #             # match_targets = (self.timeext[nd][idx_targets] == target_times)
-    #             # mask = np.isin(newtimeext,self.timeext[nd])
-    #             # indices = np.nonzero(mask)[0]
-    #             # # print("indices", indices)
-    #             #modelsol = modelsol[:,idx_targets]
-    #             # modelsoltreatlevel = modelsol[:,idx_targets]
-    #             # modelsolcontainer[nd] = modelsoltreatlevel
-    #             # print("modelsol before substitution: ")
-    #             # print(modelsol[2,:])
-    #             for endpoint in self.active_endpoints[nd]:
-    #                 if endpoint == 0:
-    #                     # llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
-    #                     #                                 self.survstruct_list[nd].deatharraytreat[i])
-    #                     # # print("llsurv treatment ", i)
-    #                     # # print(llsurv)
-    #                     # llik += llsurv
-    #                     modelsoltreatlevel[:, self.indexcommon_surv[nd][i]] = modelsol[:, self.indexcommon_surv[nd][i]] 
-    #                 elif (endpoint == 1):  # length
-    #                     lengthtreat = self.lengthstruct_list[nd].flatdataclean[i]
-    #                     weights = self.lengthstruct_list[nd].flatweightsclean[i]
-    #                     commontime =  np.array([self.indexcommon_length[nd][j] for j in range(len(self.indexcommon_length[nd])) if self.lengthstruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-    #                     modelvector = np.tile(modelsol[1, :][commontime[0]],len(commontime))[self.lengthstruct_list[nd].indfintable[i]]
-    #                     fullmodelvector1 = np.concatenate((fullmodelvector1, modelvector))
-    #                     fulllengthvector = np.concatenate((fulllengthvector, lengthtreat))
-    #                     fullweightslengthvector = np.concatenate((fullweightslengthvector, weights))
-    #                 elif (endpoint == 2):  # reproduction
-    #                     reprotreat = self.reprostruct_list[nd].flatdataclean[i]
-    #                     weights = self.reprostruct_list[nd].flatweightsclean[i]
-    #                     commontime =  np.array([self.indexcommon_repro[nd][j] for j in range(len(self.indexcommon_repro[nd])) if self.reprostruct_list[nd].treatmentsnames[j] == self.concstruct_list[nd].conctreatsnames[i]])
-    #                     modelvector = np.tile(modelsol[2, :][commontime[0]],len(commontime))[self.reprostruct_list[nd].indfintable[i]]
-    #                     fullmodelvector2 = np.concatenate((fullmodelvector2, modelvector))
-    #                     fullreprovector = np.concatenate((fullreprovector, reprotreat))
-    #                     fullweightsreprovector = np.concatenate((fullweightsreprovector, weights))
-    #         if self.lengthstruct_list[nd] is not None:
-    #             transf = self.lengthstruct_list[nd].statstype
-    #             lllength = scaled_loglikelihood(fullmodelvector1, fulllengthvector, fullweightslengthvector, transf)
-    #             # print("lllength treatment ", i)
-    #             # print(lllength)
-    #             llik += lllength
-    #         if self.reprostruct_list[nd] is not None:
-    #             transf = self.reprostruct_list[nd].statstype
-    #             llrepro = scaled_loglikelihood(fullmodelvector2, fullreprovector, fullweightsreprovector, transf)
-    #             # print("llrepro treatment ", i)
-    #             # print(llrepro)
-    #             llik += llrepro
-    #     # print("Total llk: ", -llik)
-    #     return(modelsolcontainer)
-
     
     def worker_DEBresults(
         self,
@@ -1055,8 +1069,10 @@ class DEBtox2019models:
                     modelsol = self.calc_model(self.concstruct_list[nd].concarraytr[i], self.concstruct_list[nd].timetr,
                                                modelpars, self.moa, self.feedb,
                                                self.newtimeext[nd])
-                except:
-                    # there was a problem with the ODE solver
+                except DEBSolverError:
+                    # the ODE solver could not integrate this parameter point:
+                    # treat it as an infinitely bad fit rather than crashing.
+                    # Any other exception (a real bug) is left to propagate.
                     return(np.inf)
                 
                 idx_targets = np.searchsorted(self.newtimeext[nd], self.timeext[nd])
