@@ -148,7 +148,7 @@ class concclass:
             self.concslopestr[i,:-1] = np.diff(self.concarraytr[i])/np.diff(self.time)   
             self.conctwa[i] = np.trapz(self.concarraytr[i],self.time)/self.time[-1]  # time weighted average
             self.concmax[i] = np.max(self.concarraytr[i])
-            if (np.all(self.concslopestr[i])==0) & (len(np.unique(self.concarraytr[i]))<2):
+            if (np.all(self.concslopestr[i]==0)) & (len(np.unique(self.concarraytr[i]))<2):
                 self.concconst[i] = 1
         self.time = np.unique(self.time)
         tmpslopes = self.concslopestr[np.isfinite(self.concslopestr)]
@@ -874,7 +874,6 @@ class completedataset:
         # --- 1) Determine reference labels from concentration data (authoritative) ---
         labels = self.concdata.conctreatsnames  # ndarray of treatment labels
         # Normalize to numpy array of objects/strings
-        import numpy as np
         labels = np.array(labels)
     
         # --- 2) Build boolean mask from selector ---
@@ -892,7 +891,6 @@ class completedataset:
             raise ValueError("Selector length does not match number of treatments.")
     
         # --- 3) Slice each endpoint if present ---
-        from copy import deepcopy
         new = completedataset.__new__(completedataset)  # allocate without __init__
     
         # Slice concentration
@@ -923,9 +921,6 @@ class completedataset:
                 The selected treatment labels in the desired order (e.g., the same
                 order as concdata.conctreatsnames for alignment with the exposure).
             """
-            from copy import deepcopy
-            import numpy as np
-        
             ep_new = deepcopy(ep)
         
             # --- 1) Slice rows (replicates) that belong to selected treatments ---

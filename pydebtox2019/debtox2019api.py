@@ -2,8 +2,10 @@
 classes and functions for the DEBtox2019 handling of data and parameters
 '''
 
+import warnings
 import numpy as np
 import matplotlib.pyplot as plt
+from copy import deepcopy
 from .readin import completedataset
 from . import models as mm
 from . import parspace as ps
@@ -244,8 +246,6 @@ def calc_survival_metrics(modelvals, surv_probs, surv_counts):
 
 
 def efsa_criteria(model):
-    from copy import deepcopy
-
     model = deepcopy(model)
 
     basepars = model.parvals.copy()
@@ -1501,9 +1501,6 @@ class DEBparameters:
         ndatasets : int
             Number of datasets in the model.
         """
-
-        import numpy as np
-
         self.DEBpars = DEBpars
         self.ndatasets = ndatasets
 
@@ -1527,11 +1524,35 @@ class DEBparameters:
         full_high = []
         full_owner = []
 
+        # Every normalized parameter name seen so far, across all blocks
+        # (including global_parameters) - used to catch the same parameter
+        # being defined twice (e.g. once as physiological, once as tox).
+        seen_pnames = set()
+
+        def check_new_pname(pname_n, pname):
+            if pname_n in seen_pnames:
+                raise ValueError(
+                    f"Parameter '{pname}' is defined more than once "
+                    f"(normalized name '{pname_n}' already seen)."
+                )
+            seen_pnames.add(pname_n)
+
+        REQUIRED_KEYS = {"value", "fixed", "islog", "min", "max"}
+
+        def check_required_keys(pname, pinfo):
+            missing = REQUIRED_KEYS - pinfo.keys()
+            if missing:
+                raise ValueError(
+                    f"Parameter '{pname}' is missing required key(s): "
+                    f"{sorted(missing)}"
+                )
+
         # ------------------------------------------------------------------
         # 1. Global parameters (always shared)
         # ------------------------------------------------------------------
         for pname, val in DEBpars["global_parameters"].items():
             n = normalize(pname)
+            check_new_pname(n, pname)
             full_vals.append(val)
             full_names.append(n)
             full_isfree.append(False)
@@ -1540,12 +1561,20 @@ class DEBparameters:
             full_high.append(0.0)
             full_owner.append(-1)
 
+        # index one past the last global-parameter entry: global parameters
+        # have no meaningful min/max (they're always fixed, with a 0.0/0.0
+        # placeholder above), so the bounds-related validation below only
+        # looks at entries from this index onward.
+        n_global = len(full_vals)
+
         # ------------------------------------------------------------------
         # Generic block parser (physio / special / tox)
         # ------------------------------------------------------------------
         def parse_block(block):
             for pname, pinfo in block.items():
                 pname_n = normalize(pname)
+                check_new_pname(pname_n, pname)
+                check_required_keys(pname, pinfo)
 
                 # ---- CASE 1: grouped parameters ---------------------------
                 if "groups" in pinfo:
@@ -1627,15 +1656,57 @@ class DEBparameters:
         self.par_dataset_map = np.array(full_owner, dtype=object)
 
         # ------------------------------------------------------------------
-        # 4. Convert bounds to log-space where needed
+        # 4. Values and bounds are used exactly as given in the JSON, in
+        # whichever scale `islog` implies for that parameter: if a
+        # parameter is log-transformed, both its value AND its min/max must
+        # already be supplied in log10 scale by the caller. No conversion
+        # is performed here (matching how `value` has always been treated -
+        # "the input should have the right scaling already"). The
+        # exception is preset_toxlimits, which computes bounds from
+        # physical (linear) quantities and converts them to log10 itself,
+        # inline, at the point it sets them.
         # ------------------------------------------------------------------
-        for i in range(len(self.full_list)):
-            if self.full_islog[i]:
-                self.full_lowlim[i] = np.log10(self.full_lowlim[i])
-                self.full_uplim[i] = np.log10(self.full_uplim[i])
 
         # ------------------------------------------------------------------
-        # 5. Initialize free-parameter positions
+        # 5. Validate the (expanded) parameter set
+        # ------------------------------------------------------------------
+        for i in range(n_global, len(self.full_names)):
+            name = self.full_names[i]
+            lo, hi, val = self.full_lowlim[i], self.full_uplim[i], self.full_list[i]
+
+            if lo > hi:
+                raise ValueError(
+                    f"Parameter '{name}': min ({lo}) is greater than max ({hi})."
+                )
+            if not (lo <= val <= hi):
+                raise ValueError(
+                    f"Parameter '{name}': value ({val}) is outside the "
+                    f"declared bounds [{lo}, {hi}]."
+                )
+
+            if self.full_islog[i]:
+                # Soft, best-effort heuristic: catch the common mistake of
+                # marking a parameter islog=True but forgetting to actually
+                # give its value/bounds in log10 scale. Neither symptom is
+                # proof by itself (a genuinely large exponent, or a
+                # genuinely positive-only log10 range, can both occur), so
+                # this only warns - it never blocks loading.
+                symptoms = []
+                transformed = 10.0 ** val
+                if transformed > 1e10:
+                    symptoms.append(f"10**value = {transformed:.3g} is implausibly large")
+                if lo > 0 and hi > 0:
+                    symptoms.append(f"both bounds are positive ([{lo}, {hi}])")
+                if symptoms:
+                    warnings.warn(
+                        f"Parameter '{name}' is marked islog=True, but {'; '.join(symptoms)} "
+                        f"- double check that both its value and its bounds were actually "
+                        f"given in log10 scale, not linear scale.",
+                        UserWarning,
+                    )
+
+        # ------------------------------------------------------------------
+        # 6. Initialize free-parameter positions
         # ------------------------------------------------------------------
         self.update_posfree()
 
@@ -1701,15 +1772,19 @@ class DEBparameters:
             raise ValueError("Cannot preset toxicity limits: no non-zero concentrations.")
     
         # ------------------------------------------------------------------
-        # Helper to set limits by logical (base) parameter name
+        # Helper to set limits by logical (base) parameter name. `low`/
+        # `high` are always given here in linear (physical) units; this
+        # converts them to log10 inline, at the point of assignment, for
+        # whichever expanded instances of `parname` are log-transformed -
+        # so there is nothing to track across calls, and no risk of a
+        # bound being converted twice or not at all.
         # ------------------------------------------------------------------
-        touched_names = set()
-
         def set_limits(parname, low, high):
             mask = self.full_base_names == parname
+            if self.full_islog[mask].any():
+                low, high = np.log10(low), np.log10(high)
             self.full_lowlim[mask] = low
             self.full_uplim[mask] = high
-            touched_names.add(parname)
     
         # ------------------------------------------------------------------
         # kd (dominant rate constant)
@@ -1767,14 +1842,3 @@ class DEBparameters:
             bbup  = 100 / treatments.max()
     
         set_limits("bb", bblow, bbup)
-    
-        # ------------------------------------------------------------------
-        # Convert limits to log-space where needed. Only the bounds just set
-        # above (in linear space) need this; every other parameter's bounds
-        # are already in log10-space from __init__, so touching them again
-        # here would double-apply log10 and corrupt them.
-        # ------------------------------------------------------------------
-        for i in range(len(self.full_names)):
-            if self.full_islog[i] and self.full_base_names[i] in touched_names:
-                self.full_lowlim[i] = np.log10(self.full_lowlim[i])
-                self.full_uplim[i] = np.log10(self.full_uplim[i])
