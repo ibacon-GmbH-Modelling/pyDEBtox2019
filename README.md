@@ -6,6 +6,8 @@ implemented in BYOM.
 
 The original code is written in Matlab.
 
+The writing of this software was aided by AI technologies
+
 ## License
 The software is released with a GPLv3
 

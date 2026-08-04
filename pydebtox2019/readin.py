@@ -287,8 +287,10 @@ class dataclass:
                 # formats, and the function should be able to handle all of them
                 datain = dataarray[self.treatmentsnames == self.uniquetreats[i]]
             weightsin = self.weights[self.treatmentsnames == self.uniquetreats[i]]
-            # make first sure that all the weights are Nan where the data is NaN
-            mask = np.isnan(datain)
+            # make first sure that all the weights are Nan where the data is
+            # not finite (NaN or +/-Inf - not just NaN, so a stray Inf can't
+            # leak into the nansum/nanmean calls below)
+            mask = ~np.isfinite(datain)
             weightsin[mask] = np.nan
 
             # 2. Row-wise sum ignoring NaNs
@@ -483,7 +485,7 @@ class reproclass(dataclass):
         # elif reprocase == "sex":
         #     self.makerepro_sex()
         for i in range(self.ntreats):
-            tmprepro = self.dataarray_cumulative[i, np.isnan(self.dataarray_cumulative[i])==False]
+            tmprepro = self.dataarray_cumulative[i, np.isfinite(self.dataarray_cumulative[i])]
             self.reprocumtreat.append(tmprepro)
         self.flatdataclean, self.flatweightsclean, self.indfintable = self.flatten_and_clean(self.dataarray_cumulative, self.weights)
         # to be used in the fitting
@@ -772,7 +774,18 @@ class reproclass(dataclass):
         Fnew = Fnew_avg
 
         self.weights = Fnew
-        self.dataarray_cumulative = np.cumsum(Rval / Fnew, axis=1)
+        # Once the estimated number of females alive reaches zero (e.g. all
+        # females in a replicate have died), the per-female reproduction
+        # rate for that interval (and onward) is undefined. Rather than
+        # dividing by zero and letting the outcome (NaN or Inf, depending
+        # incidentally on whether the numerator is also zero) propagate
+        # through the cumulative sum, mark those positions NaN explicitly
+        # and deterministically - so downstream NaN-based filtering always
+        # catches them, instead of only when the division happens to yield
+        # NaN rather than Inf.
+        ratio = np.full_like(Rval, np.nan)
+        np.divide(Rval, Fnew, out=ratio, where=Fnew > 0)
+        self.dataarray_cumulative = np.cumsum(ratio, axis=1)
 
 
     def plot_data(self, dataarray=None, label="Individual reproduction", wmeans=False):
