@@ -132,7 +132,17 @@ class concclass:
             else:
                 for nan_idx in np.where(nans)[0]:
                     if nan_idx == 0:
-                        self.concarraytr[i][nan_idx] = np.nan # TO DO CHECK THIS
+                        # mirror of the trailing-NaN case below: no earlier
+                        # value exists to interpolate from, so extend the
+                        # concentration backwards from the first available
+                        # (non-NaN) value instead of leaving it as NaN
+                        next_idx = nan_idx + 1
+                        while next_idx < len(self.time) and np.isnan(self.concarraytr[i][next_idx]):
+                            next_idx += 1   # make sure to find the next non-NaN value
+                        if next_idx < len(self.time):
+                            self.concarraytr[i][nan_idx] = self.concarraytr[i][next_idx]  # use the first non-nan value
+                        else:
+                            self.concarraytr[i][nan_idx] = np.nan
                     elif nan_idx == len(self.time) - 1:
                         self.concarraytr[i][nan_idx] = self.concarraytr[i][nan_idx - 1]  # use the last non-nan value
                     else:
@@ -370,7 +380,14 @@ class survdataclass(dataclass):
     """
     def __init__(self,survdata):
         super().__init__(survdata)
+        self._rebuild_derived()
 
+    def _rebuild_derived(self):
+        '''
+        Recompute every per-replicate quantity derived from dataarray/data/time.
+        Called from __init__ and from completedataset.subset() so both paths stay
+        in sync instead of drifting apart (see review item B4).
+        '''
         # additional elements specific to survival data
         self.timetreat = []
         self.survarrtreat = []
@@ -449,6 +466,14 @@ class lengthdataclass(dataclass):
     """
     def __init__(self,lengthdata):
         super().__init__(lengthdata)
+        self._rebuild_derived()
+
+    def _rebuild_derived(self):
+        '''
+        Recompute every per-replicate quantity derived from dataarray/weights.
+        Called from __init__ and from completedataset.subset() so both paths stay
+        in sync instead of drifting apart (see review item B4).
+        '''
         #self.lengthweights = np.ones_like(self.dataarray) # ported in parent class
         #self.lengthtreat = np.copy(self.dataarray)
         self.lengthtreat = []
@@ -474,7 +499,6 @@ class reproclass(dataclass):
         self.femaletable = femaletable
         self.sexratio = sexratio
         self.dataarray_cumulative = np.copy(self.dataarray)
-        self.reprocumtreat = []
         # insert here all the details of the repro handling
         # e.g. individual data, cumulative data, sex differentiation...
         # make methods for each of these cases
@@ -484,6 +508,19 @@ class reproclass(dataclass):
             self.makerepro_grp(self.survtable, self.femaletable, self.sexratio)
         # elif reprocase == "sex":
         #     self.makerepro_sex()
+        self._rebuild_derived()
+
+    def _rebuild_derived(self):
+        '''
+        Recompute the per-replicate aggregates (reprocumtreat, the flattened
+        fit vectors, weighted means/CIs) from dataarray_cumulative. Does not
+        redo the case-specific makerepro_ind/makerepro_grp transform - that
+        depends on the raw construction inputs (e.g. survtable/femaletable)
+        and only ever runs once, in __init__. completedataset.subset() slices
+        dataarray_cumulative by row and then just needs this aggregation step
+        redone (see review item B4).
+        '''
+        self.reprocumtreat = []
         for i in range(self.ntreats):
             tmprepro = self.dataarray_cumulative[i, np.isfinite(self.dataarray_cumulative[i])]
             self.reprocumtreat.append(tmprepro)
@@ -923,9 +960,15 @@ class completedataset:
 
         def _slice_endpoint(ep, ordered_unique_labels):
             """
-            Slice a dataclass-like endpoint to selected treatments and rebuild
-            collapsed lists (flatdataclean, flatweightsclean, indfintable).
-        
+            Slice a dataclass-like endpoint to selected treatments and recompute
+            every attribute derived from the raw arrays by delegating to the same
+            _rebuild_derived() that __init__ uses (flatdataclean/flatweightsclean/
+            indfintable, plus whatever the subclass adds: lengthtreat, reprocumtreat,
+            deatharraytreat, survprobstreat, lowlimtreat/upplimtreat, meanvalstransf,
+            ...). Patching a hand-picked subset of these by name (the previous
+            approach) silently went stale whenever a new derived attribute was
+            added - see review item B4.
+
             Parameters
             ----------
             ep : dataclass | lengthdataclass | reproclass | survdataclass
@@ -935,49 +978,29 @@ class completedataset:
                 order as concdata.conctreatsnames for alignment with the exposure).
             """
             ep_new = deepcopy(ep)
-        
+
             # --- 1) Slice rows (replicates) that belong to selected treatments ---
             keep_rows = np.isin(ep.treatmentsnames, np.array(ordered_unique_labels))
             ep_new.dataarray       = ep.dataarray[keep_rows, :]
             ep_new.weights         = ep.weights[keep_rows, :]
             ep_new.treatmentsnames = ep.treatmentsnames[keep_rows]
             ep_new.ntreats         = int(np.sum(keep_rows))
-        
-            # Some endpoints carry additional per-row structures. Keep them aligned:
-            if hasattr(ep_new, 'timetreat') and isinstance(ep_new.timetreat, list):
-                ep_new.timetreat = [ep_new.timetreat[i] for i, k in enumerate(keep_rows) if k]
-        
-            # Repro: also slice the cumulative matrix if present (this is the base for flattening there)
-            if hasattr(ep_new, 'dataarray_cumulative'):
+            # keep the raw (header-stripped) table column-aligned with dataarray:
+            # survdataclass._rebuild_derived reads per-replicate initial counts off it
+            ep_new.data = ep.data[:, np.concatenate(([True], keep_rows))]
+
+            # Repro: also slice the cumulative matrix if present (the case-specific
+            # makerepro_ind/makerepro_grp transform is not redone here, only sliced)
+            if hasattr(ep_new, 'dataarray_cumulative') and ep.dataarray_cumulative is not None:
                 ep_new.dataarray_cumulative = ep.dataarray_cumulative[keep_rows, :]
-        
-            # Length: if 'lengthtreat' is stored per replicate, rebuild it
-            if hasattr(ep_new, 'lengthtreat'):
-                ep_new.lengthtreat = [
-                    ep_new.dataarray[i, np.isnan(ep_new.dataarray[i]) == False]
-                    for i in range(ep_new.ntreats)
-                ]
-        
-            # Repro: if 'reprocumtreat' is stored per replicate, rebuild it from cumulative data
-            if hasattr(ep_new, 'reprocumtreat'):
-                arr = ep_new.dataarray_cumulative if hasattr(ep_new, 'dataarray_cumulative') else ep_new.dataarray
-                ep_new.reprocumtreat = [
-                    arr[i, np.isnan(arr[i]) == False]
-                    for i in range(ep_new.ntreats)
-                ]
-        
+
             # --- 2) Force unique-treatment order to match concentration order ---
-            # This ensures your model indexing like indfintable[i] matches treatment i in conc.
+            # This ensures indexing like indfintable[i] matches treatment i in conc.
             ep_new.uniquetreats = np.array(ordered_unique_labels, dtype=object)
-        
-            # --- 3) Recompute the flattened lists using the correct base array ---
-            # For reproduction use dataarray_cumulative; otherwise use dataarray.
-            base_array = ep_new.dataarray_cumulative if hasattr(ep_new, 'dataarray_cumulative') else ep_new.dataarray
-            ep_new.flatdataclean, ep_new.flatweightsclean, ep_new.indfintable = ep_new.flatten_and_clean(
-                base_array,
-                ep_new.weights
-            )
-        
+
+            # --- 3) Recompute every derived attribute through the same path __init__ uses ---
+            ep_new._rebuild_derived()
+
             return ep_new
     
         # labels = self.concdata.conctreatsnames (authoritative order)

@@ -366,6 +366,12 @@ class PyParspace:
     
     # "Private" method to perform a standard optimization using the Nelder-Mead algorithm
     def _NM_minimizer(self, pfit, allpars, posfree, rough=0):
+        if len(posfree) == 0:
+            # Nothing left to optimize over (e.g. profiling the only free parameter
+            # of the model). scipy's Nelder-Mead cannot handle a 0-dimensional
+            # problem: it returns fun=inf without ever calling the objective.
+            # Evaluate the likelihood directly instead.
+            return (pfit, self.model.log_likelihood(pfit, allpars, posfree))
         if self.npars==1:
             bounds=None
         else:
@@ -774,10 +780,6 @@ class PyParspace:
                     print("Better optimum found when extending profile for ", self.parlabels[self.posfree[index]], " up: ", mll_tst, " (best was ", mll, ")")
                 mll = mll_tst
 
-        if self.npars == 1:
-                self.allow_multiprocessing = False
-                parprof = np.column_stack((parprof[:,0], self._applylog(parprof[:,0])))
-        self.allow_multiprocessing = True
         # in the end coll_ok is returned by the function together with the profile and
         # the best fit parameter set
         coll_ok = np.append(coll_ok, coll_okL[:,None], axis=1)
@@ -945,10 +947,10 @@ class PyParspace:
         if batchmode==False:
             plt.show()
             if savefig:
-                plt.savefig(figbasename+"_"+self.model.variant+extension)
+                plt.savefig(figbasename+extension)
         else:
             if savefig:
-                plt.savefig(figbasename+"_"+self.model.variant+extension)
+                plt.savefig(figbasename+extension)
             plt.close()
 
     # Run the paramter space explorer with the given options defined in the 

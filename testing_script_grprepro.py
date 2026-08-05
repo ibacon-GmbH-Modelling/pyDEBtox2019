@@ -51,10 +51,10 @@ if __name__ == "__main__":
 
 
     # isolate the controls    
-    full_ds, control_ds, ph = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='both')
+    full_ds, control_ds, ph = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='solvent')
     
     # take only the survival data from the controls
-    _,hbonly,_ = dt2019.build_dataset_variants(ccl=ccl, lcl=None,rcl=None,scl=scl,control_type='both')
+    _,hbonly,_ = dt2019.build_dataset_variants(ccl=ccl, lcl=None,rcl=None,scl=scl,control_type='solvent')
 
     # set the parameter limits to start the grid search
     debparameters.preset_toxlimits(moas, feedbs, ccl)
@@ -85,19 +85,19 @@ if __name__ == "__main__":
     dt2019.plot_DEBresults(parspaceres=parspacehb,wmeans=False)
 
 
-    debparameters.full_list = parspacehb.model.parvals
-    debparameters.set_freefix_parameters("hb", isfree=False)
-    debparameters.set_freefix_parameters_list(["lp","lm","rb","rm"], isfree=True)
+    # debparameters.full_list = parspacehb.model.parvals
+    # debparameters.set_freefix_parameters("hb", isfree=False)
+    # debparameters.set_freefix_parameters_list(["lp","lm","rb","rm"], isfree=True)
 
-    debmodelctrl = mm.DEBtox2019models([control_ds],
-                                       debparameters,
-                                       moas, feedbs, Tbp=0,solver='LSODA')
-    parspacectrl = ps.PyParspace(ps.SettingParspace(0,1), debmodelctrl)  
-    startt = time.time()
-    parspacectrl.run_parspace()
-    endt = time.time()
-    print("Time for physiological model fit: ", endt-startt)
-    dt2019.plot_DEBresults(parspacectrl,CI=True,multicore=True)
+    # debmodelctrl = mm.DEBtox2019models([control_ds],
+    #                                    debparameters,
+    #                                    moas, feedbs, Tbp=0,solver='LSODA')
+    # parspacectrl = ps.PyParspace(ps.SettingParspace(0,1), debmodelctrl)  
+    # startt = time.time()
+    # parspacectrl.run_parspace()
+    # endt = time.time()
+    # print("Time for physiological model fit: ", endt-startt)
+    # dt2019.plot_DEBresults(parspacectrl,CI=True,multicore=True)
 
     
     # debparameters.full_list = parspacectrl.model.parvals

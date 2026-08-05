@@ -91,11 +91,11 @@ def _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb):
     hb = a * hb**a * t**(a-1)  # age-dependent background hazard
     Cval = np.interp(t, timextr,C)  #to be seen here how to deal with multiplication factors
 
-    y[1] = max(1e-3*L0,y[1])  # to avoid numerical issues with length = 0
+    L = max(1e-3*L0,y[1])  # to avoid numerical issues with length = 0
     if Lf>0:
-        f = f/(1+(Lf*Lf*Lf)/(y[1]+y[1]+y[1]))
+        f = f/(1+(Lf*Lf*Lf)/(L*L*L))
     if Lj>0:
-        f = f * min(1, y[1]/Lj)
+        f = f * min(1, L/Lj)
 
     stress = bb*max(y[0]-zb,0)
     hazard = bs*max(y[0]-zs,0)
@@ -104,24 +104,24 @@ def _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb):
     sMOA = moa * stress
     sMOA[0] = min(sMOA[0],1)
     sA,sM,sG,sR,sH = sMOA
-    dydt[1] = rB * ((1+sM)/(1+sG)) * (f*Lm*((1-sA)/(1+sM)) - y[1])  # ODE for body length
+    dydt[1] = rB * ((1+sM)/(1+sG)) * (f*Lm*((1-sA)/(1+sM)) - L)  # ODE for body length
     # introduce starvation rules
     fR = f    # if there is no starvation, f for reproduction is the standard f
     if (dydt[1]<0):
-        fR = (f - kap * (y[1]/Lm) * ((1+sM)/(1-sA)))/(1-kap)
+        fR = (f - kap * (L/Lm) * ((1+sM)/(1-sA)))/(1-kap)
         if (fR >= 0):
             dydt[1] = 0  # stop growth but no shrinking
         else:
             fR = 0
-            dydt[1] = (rB*(1+sM)/yP) * ((f*Lm/kap)*((1-sA)/(1+sM)) - y[1]) # allow some shrinking
+            dydt[1] = (rB*(1+sM)/yP) * ((f*Lm/kap)*((1-sA)/(1+sM)) - L) # allow some shrinking
 
     R = 0  # reproduction is 0, unless...
-    if (y[1]>=Lp):
-        R = max(0.,(np.exp(-sH)*Rm/(1+sR)) * (fR*Lm*(y[1]*y[1])*(1-sA) - (Lp*Lp*Lp)*(1+sM))/(Lm*Lm*Lm - Lp*Lp*Lp))
+    if (L>=Lp):
+        R = max(0.,(np.exp(-sH)*Rm/(1+sR)) * (fR*Lm*(L*L)*(1-sA) - (Lp*Lp*Lp)*(1+sM))/(Lm*Lm*Lm - Lp*Lp*Lp))
     dydt[2] = R
     dydt[3]  = -(hazard + hb) * y[3]
 
-    xu,xe,xG,xR = feedb * np.array([Lm_ref/y[1], Lm_ref/y[1], (3/y[1])*dydt[1], R*FBV*KRV])
+    xu,xe,xG,xR = feedb * np.array([Lm_ref/L, Lm_ref/L, (3/L)*dydt[1], R*FBV*KRV])
     if xu==0:
         xu = 1
     if xe==0:
@@ -130,7 +130,7 @@ def _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb):
 
     dydt[0] = kd * (xu * Cval - xe * y[0]) - (xG + xR) * y[0]
 
-    if (y[1] <= 0.5 * L0): # if an animal has size less than half the start size ...
+    if (L <= 0.5 * L0): # if an animal has size less than half the start size ...
         dydt[1] = 0.  # don't let it grow or shrink any further (to avoid numerical issues)
 
     if (t<Tlag):
@@ -482,7 +482,8 @@ class DEBtox2019models:
     
     def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
         """
-        Compute DEB model with optional reproduction time delay (Tbp).
+        Compute DEB model with optional reproduction time delay (Tbp) and
+        optional segmented (breaktime) solving across concentration steps.
         Assumptions:
           - modelsol has shape (n_states, n_timepoints).
           - timeext is a 1D increasing array of time points.
@@ -490,24 +491,36 @@ class DEBtox2019models:
         """
         L0 = DEBpars[5]
         y0 = np.array([0., L0*1.0, 0., 1.])
-        # If no delay, shortcut
-        if not (hasattr(self, "Tbp") and self.Tbp and self.Tbp > 0):
-            return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver=self.solver)
 
-        Tbp = self.Tbp
+        apply_delay = bool(hasattr(self, "Tbp") and self.Tbp and self.Tbp > 0)
+        Tbp = self.Tbp if apply_delay else 0.0
         # compute delayed times (tbp) relative to original grid
         # only times strictly greater than Tbp contribute to a delayed output
-        tbp = timeext[timeext > Tbp] - Tbp
-        if tbp.size == 0:
-            # Nothing to delay; just solve on the original grid
+        tbp = timeext[timeext > Tbp] - Tbp if apply_delay else np.array([])
+        if apply_delay and tbp.size == 0:
+            apply_delay = False  # nothing to delay after all
+
+        # Simplest case: no segmented (breaktime) solve and no delay to
+        # apply - solve once, directly on the requested grid.
+        if not self.breaktime and not apply_delay:
             return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver=self.solver)
-        # Merge original time grid with delayed grid so the solver "sees" the delayed trajectory
-        # Keep order and uniqueness
+
+        # Merge the original time grid with the concentration-step times
+        # (needed to align breaktime segments to C's own time points) and,
+        # if a delay applies, the delayed grid too, so the solver "sees" the
+        # delayed trajectory. Keep order and uniqueness.
         newtime = np.unique(np.concatenate((timeext, tbp, timextr))) # adding the original conc times for stability
         modelsol_union = np.zeros((4, len(newtime)))  # pre-allocate for union grid results
         if self.breaktime:
             # print("Newtime vector for breaktime approach: ", newtime)
             for t in range(len(C)-1):
+                if timextr[t+1] <= timextr[t]:
+                    # zero-length segment - e.g. a duplicated time point used
+                    # to encode an instantaneous concentration step. There is
+                    # nothing to integrate; y0 simply carries over unchanged
+                    # into the next segment, and the shared newtime slot at
+                    # this timepoint is filled by the neighboring segment.
+                    continue
                 shifted_tvec = newtime[(newtime <= timextr[t+1]) & (newtime >= timextr[t])] - timextr[t]
                 # print("Segment ", t, " with shifted time vector: ", shifted_tvec)
                 # print("Concentration segment: ", C[t:t+1])
@@ -521,7 +534,7 @@ class DEBtox2019models:
             # modelsol_union: shape (n_states, len(newtime))
 
         # We will rebuild the final solution strictly on the original timeext grid
-        # Build indexes that map timeext → newtime and tbp → newtime
+        # Build indexes that map timeext → newtime
         # Because arrays are sorted, use searchsorted then verify exact equality to guard against FP mismatch
         idx_timeext_in_union = np.searchsorted(newtime, timeext)
         match_timeext = (newtime[idx_timeext_in_union] == timeext)
@@ -529,6 +542,13 @@ class DEBtox2019models:
             # In case of floating-point differences, fall back to robust approach
             # (Still O(n log n), but safe)
             idx_timeext_in_union = np.array([np.where(newtime == t)[0][0] for t in timeext])
+        # Build the final model solution aligned to original timeext
+        modelsol = modelsol_union[:, idx_timeext_in_union]  # shape (n_states, len(timeext))
+
+        if not apply_delay:
+            return modelsol
+
+        # tbp → newtime index map, only needed to extract the delayed values below
         idx_tbp_in_union = np.searchsorted(newtime, tbp)
         match_tbp = (newtime[idx_tbp_in_union] == tbp)
         if not np.all(match_tbp):
@@ -536,8 +556,6 @@ class DEBtox2019models:
         # Extract the delayed state from union grid at tbp positions
         REPRO_STATE_IDX = ENDPOINTS[NAME_TO_CODE['reproduction']].state_idx
         delayed_values = modelsol_union[REPRO_STATE_IDX, idx_tbp_in_union]  # shape (len(tbp),)
-        # Build the final model solution aligned to original timeext
-        modelsol = modelsol_union[:, idx_timeext_in_union]  # shape (n_states, len(timeext))
         # Zero out reproduction before applying delayed contribution (as per your logic)
         # If you need additive behavior, change this to additive instead of overwrite.
         modelsol[REPRO_STATE_IDX, :] = 0.0

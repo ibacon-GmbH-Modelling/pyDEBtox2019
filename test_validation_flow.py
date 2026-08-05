@@ -7,7 +7,7 @@
 # in test_calc_ecx.py (see around its call to ps.PyParspace there).
 
 import matplotlib
-matplotlib.use("Agg")  # keep this script runnable headless / non-interactively
+#matplotlib.use("Agg")  # keep this script runnable headless / non-interactively
 
 import json
 import numpy as np
@@ -74,10 +74,10 @@ if __name__ == "__main__":
 
     ccl_calib, lcl_calib, rcl_calib, scl_calib = _read_raw_components()
     full_ds_calib, control_ds_calib, _ = dt2019.build_dataset_variants(
-        ccl_calib, lcl_calib, rcl_calib, scl_calib, control_type='both'
+        ccl_calib, lcl_calib, rcl_calib, scl_calib, control_type='solvent'
     )
     _, hbonly_calib, _ = dt2019.build_dataset_variants(
-        ccl=ccl_calib, lcl=None, rcl=None, scl=scl_calib, control_type='both'
+        ccl=ccl_calib, lcl=None, rcl=None, scl=scl_calib, control_type='solvent'
     )
 
     debparameters_tox.preset_toxlimits(moas, feedbs, ccl_calib)
