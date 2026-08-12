@@ -262,18 +262,10 @@ def efsa_criteria(model):
 
         modelpars = model.build_dataset_parameters(basepars, nd)
 
-        newtime = model.timeext[nd]
-
-        newtimeext = np.unique(
-            np.concatenate((
-                np.linspace(
-                    newtime[0],
-                    newtime[-1],
-                    max(model.min_t, len(newtime))
-                ),
-                newtime
-            ))
-        )
+        # DEBtox2019models.__init__ already built this exact grid once and
+        # cached it as model.newtimeext[nd] - reuse it instead of
+        # recomputing it here, so the two can't drift apart (see A11).
+        newtimeext = model.newtimeext[nd]
 
         modelcoltreatcont = [None] * model.concstruct_list[nd].ntreats
 

@@ -1,5 +1,4 @@
 import numpy as np
-from dataclasses import dataclass
 from numba import jit
 from scipy.integrate import odeint,solve_ivp
 from scipy.optimize import brentq
@@ -7,58 +6,23 @@ import multiprocessing as mp
 import psutil
 n_cores = psutil.cpu_count(logical=False) # to have the number of physical cores only
 
+# EndpointSpec/ENDPOINTS/NAME_TO_CODE live in the dependency-free endpoints
+# module and are re-exported here so existing code (mm.ENDPOINTS etc.) keeps
+# working unchanged - see endpoints.py's module docstring for why they no
+# longer live in models.py itself (review item A3).
+from .endpoints import EndpointSpec, ENDPOINTS, NAME_TO_CODE
 
-@dataclass(frozen=True)
-class EndpointSpec:
-    """
-    Everything the rest of the package needs to know about one observable
-    endpoint, in one place, so it doesn't have to be re-declared (and kept
-    in sync by hand) everywhere an endpoint is referenced by code.
-
-    Attributes:
-    - code: the integer endpoint code used throughout the package (in
-      active_endpoints, calc_ecx/calc_epx's `endpoints=` argument, etc.)
-    - name: display/lookup name, e.g. 'length'
-    - state_idx: row in the array returned by calc_model that this
-      endpoint reads. NOTE this is *not* the same numbering as `code` -
-      e.g. survival is code 0 but state row 3 - which is exactly why this
-      needs to be an explicit, named mapping rather than an assumption.
-    - dataset_attr: attribute name on a `completedataset` instance that
-      signals this endpoint is present (e.g. 'lengthdata'); also the key
-      used in `completedataset.time_indices` for this endpoint.
-    - struct_list_attr: attribute name on `DEBtox2019models` holding the
-      per-dataset list of this endpoint's data structure (e.g.
-      'lengthstruct_list').
-    - indexcommon_attr: attribute name on `DEBtox2019models` holding the
-      per-dataset list of this endpoint's common-time indices (e.g.
-      'indexcommon_length').
-    - is_survival: True only for the survival endpoint - used where
-      survival needs different handling from the other (continuous)
-      endpoints, e.g. LCx/LPx vs ECx/EPx labeling.
-    """
-    code: int
-    name: str
-    state_idx: int
-    dataset_attr: str
-    struct_list_attr: str
-    indexcommon_attr: str
-    is_survival: bool = False
-
-
-# Declared in the same order the pre-registry code used to append to
-# active_endpoints (length, reproduction, survival) so that ordering -
-# e.g. the order endpoints are summed in log_likelihood, or printed in
-# efsa_criteria - is unchanged by this being a loop over a dict now.
-ENDPOINTS = {
-    1: EndpointSpec(1, 'length', state_idx=1, dataset_attr='lengthdata',
-                     struct_list_attr='lengthstruct_list', indexcommon_attr='indexcommon_length'),
-    2: EndpointSpec(2, 'reproduction', state_idx=2, dataset_attr='reprodata',
-                     struct_list_attr='reprostruct_list', indexcommon_attr='indexcommon_repro'),
-    0: EndpointSpec(0, 'survival', state_idx=3, dataset_attr='survdata',
-                     struct_list_attr='survstruct_list', indexcommon_attr='indexcommon_surv',
-                     is_survival=True),
-}
-NAME_TO_CODE = {spec.name: code for code, spec in ENDPOINTS.items()}
+# Canonical DEB parameter order (normalized names). This is the single
+# source of truth for both DEBtox2019models._build_par_index_map (which
+# resolves each of these, once per dataset, at construction time) and
+# build_dataset_parameters (which reads the result back in this same
+# order) - so the two can't silently drift apart.
+DEB_PAR_ORDER = (
+    "fbv", "krv", "kap", "yp", "lm_ref",
+    "l0", "lp", "lm", "rb", "rm",
+    "f", "hb", "a", "lf", "lj", "tlag",
+    "kd", "bb", "zb", "bs", "zs",
+)
 
 
 class DEBSolverError(Exception):
@@ -365,6 +329,12 @@ class DEBtox2019models:
         self.ndatasets = len(completedataset_list)  # number of datasets
         self.par_dataset_map = debparameterclass.par_dataset_map
         self.full_base_names = debparameterclass.full_base_names
+        # resolve (dataset, canonical parameter) -> expanded-vector index once
+        # here, instead of on every build_dataset_parameters call (see O1/A5);
+        # this also turns the three RuntimeErrors it can raise into
+        # construction-time validation instead of failures thousands of
+        # likelihood evaluations into a fit.
+        self._par_index = self._build_par_index_map()
         # attributes that deal with the model parameters
         self.parnames = np.array(debparameterclass.full_names,dtype=object)   # make sure these are numpy arrays
         self.parvals = np.array(debparameterclass.full_list)
@@ -424,60 +394,83 @@ class DEBtox2019models:
                 print(f"{self.parnames[i]:<10} {self.parvals[i]:<8.4f} {self.islog[i]:<8} {self.isfree[i]:<6} ({self.parbound_lower[i]:<10.4f}, {self.parbound_upper[i]:<10.4f})")
 
     
+    def _build_par_index_map(self):
+        """
+        Resolve, once for every (dataset, canonical parameter) pair, which
+        entry of the expanded parameter vector build_dataset_parameters
+        should read - i.e. do the resolution build_dataset_parameters used
+        to redo from scratch on every single call (up to tens of thousands
+        of times per fit), and cache it as a plain (ndatasets, len(DEB_PAR_ORDER))
+        integer index array.
+
+        Resolution rules (unchanged from the previous per-call version):
+        an explicit grouped/dataset-specific match for this dataset wins;
+        more than one such match is ambiguous and a hard error; otherwise
+        fall back to the shared (non-grouped) definition; no match at all
+        is also a hard error. All of this depends only on full_base_names/
+        par_dataset_map/ndatasets - never on parameter values - so it is
+        safe to resolve once here rather than on every likelihood call.
+
+        Every cell of the returned array is a valid index into the
+        expanded parameter vector: any (dataset, parameter) pair that
+        can't be resolved raises immediately, right here, instead of
+        leaving a placeholder that could later be silently indexed.
+        """
+        n_par = len(DEB_PAR_ORDER)
+        par_index = np.zeros((self.ndatasets, n_par), dtype=int)
+
+        for nd in range(self.ndatasets):
+            for i, pname in enumerate(DEB_PAR_ORDER):
+
+                # All expanded indices for this base parameter
+                indices = np.where(self.full_base_names == pname)[0]
+
+                if len(indices) == 0:
+                    raise RuntimeError(f"Parameter '{pname}' missing.")
+
+                # 1) Find grouped / dataset-specific match
+                selected = []
+                for idx in indices:
+                    owner = self.par_dataset_map[idx]
+                    if owner == -1:
+                        continue
+                    if nd in owner:
+                        selected.append(idx)
+
+                if len(selected) == 1:
+                    par_index[nd, i] = selected[0]
+                    continue
+
+                if len(selected) > 1:
+                    raise RuntimeError(
+                        f"Ambiguous grouped definition for '{pname}' in dataset {nd}"
+                    )
+
+                # 2) Fallback to shared parameter
+                shared = [idx for idx in indices if self.par_dataset_map[idx] == -1]
+
+                if len(shared) == 1:
+                    par_index[nd, i] = shared[0]
+                    continue
+
+                if len(shared) > 1:
+                    raise RuntimeError(
+                        f"Ambiguous shared definition for '{pname}' (dataset {nd})"
+                    )
+
+                raise RuntimeError(
+                    f"Cannot resolve parameter '{pname}' for dataset {nd}"
+                )
+
+        return par_index
+
     def build_dataset_parameters(self, expanded_parvals, nd):
         """
         Collapse expanded parameter vector into a dataset-specific
-        DEB parameter vector compatible with the ODE solver.
+        DEB parameter vector compatible with the ODE solver, using the
+        (dataset, parameter) -> index map resolved once in __init__.
         """
-    
-        # Canonical DEB parameter order (normalized)
-        deb_order = [
-            "fbv", "krv", "kap", "yp", "lm_ref",
-            "l0", "lp", "lm", "rb", "rm",
-            "f", "hb", "a", "lf", "lj", "tlag",
-            "kd", "bb", "zb", "bs", "zs"
-        ]
-    
-        compact = np.zeros(len(deb_order))
-    
-        for i, pname in enumerate(deb_order):
-        
-            # All expanded indices for this base parameter
-            indices = np.where(self.full_base_names == pname)[0]
-    
-            if len(indices) == 0:
-                raise RuntimeError(f"Parameter '{pname}' missing.")
-    
-            # 1️ Find grouped / dataset-specific match
-            selected = []
-            for idx in indices:
-                owner = self.par_dataset_map[idx]
-                if owner == -1:
-                    continue
-                if nd in owner:
-                    selected.append(idx)
-    
-            if len(selected) == 1:
-                compact[i] = expanded_parvals[selected[0]]
-                continue
-            
-            if len(selected) > 1:
-                raise RuntimeError(
-                    f"Ambiguous grouped definition for '{pname}' in dataset {nd}"
-                )
-    
-            # 2️ Fallback to shared parameter
-            shared = [idx for idx in indices if self.par_dataset_map[idx] == -1]
-    
-            if len(shared) == 1:
-                compact[i] = expanded_parvals[shared[0]]
-                continue
-            
-            raise RuntimeError(
-                f"Cannot resolve parameter '{pname}' for dataset {nd}"
-            )
-    
-        return compact
+        return expanded_parvals[self._par_index[nd]]
 
     
     def calc_model(self, C, timextr, DEBpars, moa, feedb, timeext):
@@ -495,8 +488,12 @@ class DEBtox2019models:
         apply_delay = bool(hasattr(self, "Tbp") and self.Tbp and self.Tbp > 0)
         Tbp = self.Tbp if apply_delay else 0.0
         # compute delayed times (tbp) relative to original grid
-        # only times strictly greater than Tbp contribute to a delayed output
-        tbp = timeext[timeext > Tbp] - Tbp if apply_delay else np.array([])
+        # only times strictly greater than Tbp contribute to a delayed output.
+        # delay_mask is kept around (rather than only its values, tbp) so
+        # that later on we can recover exactly which positions of timeext
+        # these came from without reconstructing them - see B16.
+        delay_mask = timeext > Tbp if apply_delay else None
+        tbp = timeext[delay_mask] - Tbp if apply_delay else np.array([])
         if apply_delay and tbp.size == 0:
             apply_delay = False  # nothing to delay after all
 
@@ -559,28 +556,19 @@ class DEBtox2019models:
         # Zero out reproduction before applying delayed contribution (as per your logic)
         # If you need additive behavior, change this to additive instead of overwrite.
         modelsol[REPRO_STATE_IDX, :] = 0.0
-        # Now place delayed values at indices corresponding to (tbp + Tbp) on timeext
-        # Because timeext is sorted, we can locate these quickly
-        target_times = tbp + Tbp
-        idx_targets = np.searchsorted(timeext, target_times)
-        match_targets = (timeext[idx_targets] == target_times)
-        if not np.all(match_targets):
-            # No exact matches → likely due to floating-point spacing.
-            # If acceptable, we can snap to nearest indices within a small tolerance.
-            # Otherwise, skip with a warning.
-            # Here, we use a tolerance approach:
-            tol = np.finfo(float).eps * 10  # small tolerance
-            # Compute closest indices by absolute difference
-            # (This is O(n*m) if done naively; be cautious if arrays are huge.)
-            # Optimized nearest neighbor via searchsorted with bounds check:
-            idx_targets = np.clip(np.searchsorted(timeext, target_times), 0, len(timeext)-1)
-            close_enough = np.abs(timeext[idx_targets] - target_times) <= tol
-            # Assign only where close enough
-            if np.any(close_enough):
-                modelsol[REPRO_STATE_IDX, idx_targets[close_enough]] = delayed_values[close_enough]
-        else:
-            # Assign only for exact matches
-            modelsol[REPRO_STATE_IDX, idx_targets[match_targets]] = delayed_values[match_targets]
+        # Place delayed values back at the timeext positions they came from.
+        # delay_mask already *is* exactly "which positions of timeext are
+        # tbp + Tbp" - reconstructing target_times = tbp + Tbp and
+        # re-searching for it in timeext (the previous approach) isn't
+        # guaranteed to round-trip in floating point, which could either
+        # raise an IndexError (searchsorted landing one past the end) or,
+        # more insidiously, silently leave that timepoint's reproduction at
+        # the 0.0 written above if the round-off fell outside an
+        # overly-tight fixed tolerance (see review item B16). Using the
+        # mask directly has no arithmetic in the mapping, so neither
+        # failure mode is possible.
+        idx_targets = np.flatnonzero(delay_mask)
+        modelsol[REPRO_STATE_IDX, idx_targets] = delayed_values
         return(modelsol)
 
     # State index (row in the array returned by calc_model) that each endpoint

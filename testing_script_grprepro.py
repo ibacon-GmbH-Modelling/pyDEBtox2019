@@ -49,7 +49,7 @@ if __name__ == "__main__":
     rcl.plot_data_cumulative()
     
 
-
+    '''
     # isolate the controls    
     full_ds, control_ds, ph = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='solvent')
     
@@ -115,3 +115,4 @@ if __name__ == "__main__":
     # endt=time.time()
     # print("Time for tox fit: ",endt-startt)
     # dt2019.plot_DEBresults(parspacetox,CI=True,multicore=True)
+    '''

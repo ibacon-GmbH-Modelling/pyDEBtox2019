@@ -166,7 +166,7 @@ plt.savefig(figbasename+"_"+self.model.variant+extension)
 Every `savefig=True` call path in `run_parspace` / `replot_results` fails. Leftover from the
 GUTS codebase this was ported from.
 
-
+**!!!DONE!!!**
 
 ### B7. `pbest` captured before it is written during profiling
 `parspace.py:671-676`
@@ -189,6 +189,8 @@ a zero row has `mll = 0.0`, which for a negative best log-likelihood will win th
 trigger a spurious "profiling found a new minimum" restart from an all-zero parameter vector.
 
 Fix: `pbest = np.concatenate((pmat_tst, [mll_tst]))`.
+
+**!!!DONE!!!**
 
 ### B8. `scaled_loglikelihood`'s missing-data filter is broken — **[verified]**
 `models.py:222-245`
@@ -252,6 +254,8 @@ is limited — but `concarray` *is* used (`debtox2019api.py:88,91`) and is being
 Also `conctwa = trapz(c, t)/self.time[-1]` should divide by `t[-1] - t[0]` to be a time-weighted
 average for a profile not starting at 0.
 
+**!!!DONE!!!**
+
 ### B10. `concclass(..., focus=True)` reads data rows as treatment names
 `readin.py:107-117`
 
@@ -263,6 +267,13 @@ documented way to feed a raw exposure profile into `calc_epx` via
 
 Either strip consistently, or make `focus=True` a separate constructor
 (`concclass.from_profile(time, conc)`) that never pretends to have a header.
+
+**!!!NOT REAL BUG!!!** `focus=True` input files (e.g. `apple_R1_pond.txt`, via
+`_resolve_exposure_profile`) have no header row at all by design - every row is real
+time/concentration data, so there is no header being misread. `conctreatsnames` ends up holding
+the first row's concentration values, but nothing downstream reads it for this single-profile
+path (`_resolve_exposure_profile` only accepts `ntreats == 1`). Confirmed against
+`test_calc_epx.py:49-54`, which already documents and exercises this correctly.
 
 ### B11. `makerepro_ind` case 2 mutates the raw data array
 `readin.py:687-693`
@@ -277,6 +288,8 @@ Cases 0 and 1 both use `.copy()`; case 2 does not. The `-1` first-egg markers ar
 destroyed in `self.dataarray`, which is what `plot_data()` (non-cumulative) and
 `flatten_and_clean` for the raw array would show. Inconsistent with the sibling branches and
 with the "keep raw, derive cumulative" design of the class.
+
+**!!!DONE!!!**
 
 ### B12. `_print_results` mutates `coll_all` — reprinting corrupts the sample
 `parspace.py:799`
@@ -295,6 +308,8 @@ entry point — calling it twice appends the profiles twice, inflating `coll_all
 call. The merge (which is legitimate — BYOM does fold profiles into the cloud) belongs in
 `run_parspace`, once.
 
+**!!!DONE!!!**
+
 ### B13. Off-by-one / inconsistency in the propagation-set slice
 `parspace.py:1267` vs `1422`
 
@@ -308,6 +323,8 @@ Two different conventions for the same quantity. Additionally `ind_prop1` is
 slice starts one set outside the intended band in both branches. Should be `ind_prop1 + 1`
 (and consistent `+1` on the upper end).
 
+**!!!DONE!!!**
+
 ### B14. Hard-coded 10-element tables break above 10 free parameters
 `parspace.py:197-215, 983-984`
 
@@ -316,6 +333,10 @@ slice starts one set outside the intended band in both branches. Should be `ind_
 expansion multiplies the parameter count) this raises `IndexError` deep inside `run_parspace`
 rather than failing fast with a clear message. Add an explicit check, or clamp to the last row
 the way `crit_table[5:] = crit_table[4]` already does conceptually.
+
+**!!!DONE!!!** `PyParspace.__init__` now raises a clear `ValueError` ("fitting more than 10
+parameters simultaneously ... is not advisable") as soon as `self.npars` exceeds
+`len(self.opts.crit_table)`, instead of an `IndexError` deep inside `run_parspace`.
 
 ### B15. Age-dependent background hazard is singular at t=0 for `a < 1`
 `models.py:91`
@@ -330,6 +351,10 @@ evaluation. BYOM guards this branch (`if a ~= 1`) and the model is only meaningf
 Since `a` has bounds `[0, 10]` in the JSON and could be freed, add a small floor on `t` or gate
 the branch on `a != 1`.
 
+**!!!WONTFIX!!!** Deliberate scope decision, not an oversight: users of this package already know
+how to handle the age-dependent hazard parameter `a`, and guidance on it will be provided in
+documentation when the code ships, rather than via a runtime code change.
+
 ### B16. `calc_model` Tbp fallback path can raise or silently drop values
 `models.py:546-565`
 
@@ -342,6 +367,11 @@ the branch on `a != 1`.
 - When a target is not close enough, its reproduction entry is left at the `0.0` written a few
   lines earlier — a silent zero, not a NaN or an error. Given that the previous review's #1 was
   exactly this class of silent Tbp corruption, this deserves to fail loudly.
+
+**!!!DONE!!!** Replaced the `target_times = tbp + Tbp` reconstruction (and its searchsorted +
+tolerance fallback) with placing delayed values via the original `delay_mask = timeext > Tbp`
+directly (`idx_targets = np.flatnonzero(delay_mask)`) - no arithmetic in the mapping, so neither
+the `IndexError` nor the silent-drop failure mode is possible anymore.
 
 ### B17. `log_likelihood` assumes all replicates of a treatment share one time vector
 `models.py:1098-1099, 1106-1107`
@@ -357,6 +387,14 @@ enforce (`timetreat[i] = self.time` for all `i`), but nothing checks it, and `su
 deliberately breaks that invariant for its own endpoint. If `commontime` is empty (a treatment
 present in the concentration file but absent from the length file) this is an `IndexError`.
 An explicit assertion or a clear error message would be cheap.
+
+**!!!NOT REAL BUG!!!** In the standard dataset format, replicates always share the same time
+vector: `dataclass.__init__` sets every replicate's `timetreat[i]` to the same shared `self.time`
+array (length/repro deliberately skip the per-replicate NaN-filtering `survdataclass` does - see
+the comment there). A replicate missing an observation is represented by a NaN in that cell, not
+a shorter/different time vector; the NaN is filtered out later via `indfintable`. So
+`commontime[0] == commontime[j]` for every `j` is a guaranteed invariant of the data format, not
+an unchecked assumption.
 
 ---
 
@@ -400,10 +438,22 @@ that should be deleted before someone uses it and inherits the wrong endpoint co
 Also `type(x) is concclass` should be `isinstance(...)` — the strict identity check silently
 *drops* a user's subclass instead of erroring, which is the worst of both worlds.
 
+**!!!DONE!!!** `EndpointSpec`/`ENDPOINTS`/`NAME_TO_CODE` were extracted into a new, dependency-free
+`pydebtox2019/endpoints.py` (importing them into `readin.py` from `models.py` directly would have
+been a backwards dependency; `models.py` now re-exports them so existing `mm.ENDPOINTS` consumers
+are unaffected). `completedataset.__init__`/`calc_common_timeindices` now loop over
+`ENDPOINTS.values()` instead of three hand-duplicated `hasattr` blocks, using `isinstance` instead
+of `type(x) is Y`. `compile_dataset_dict` was deleted (confirmed zero call sites anywhere).
+
 ### A4. `type(...) is` / silent-drop failure mode in `completedataset.__init__`
 Passing a wrong-typed `lendata` (say, a raw ndarray) is not an error: the attribute is simply
 never set, `complete_timevec` is built without it, and the model quietly fits without that
 endpoint. Raise instead.
+
+**!!!DONE!!!** Each endpoint check (and `concdata`) now distinguishes `None` (legitimately not
+provided - silently skipped) from anything else that isn't the expected class (raises a
+`TypeError` naming the parameter and expected class), instead of both cases taking the same
+silent no-op path.
 
 ### A5. Parameter name → index resolution is string-matching in the hot loop
 `models.py:427-480`
@@ -418,6 +468,15 @@ This should be resolved once in `__init__` into an `(ndatasets, 21)` integer ind
 `build_dataset_parameters` becomes `expanded_parvals[self._par_index[nd]]`. That also converts
 the three `RuntimeError` cases from per-call surprises into construction-time validation, which
 is where they belong. See O1.
+
+**!!!DONE!!!** (together with O1) `DEB_PAR_ORDER` is now a module-level constant (single source of
+truth for both the resolver and the reader), `_build_par_index_map()` resolves every
+`(dataset, parameter)` pair once in `__init__` and raises immediately for any unresolved case (no
+placeholder/sentinel value can ever survive into the returned array), and
+`build_dataset_parameters` is now `return expanded_parvals[self._par_index[nd]]`. Verified against
+an independent reimplementation of the old per-call algorithm on `input_pars_grp_multiple.json`
+(a real 3-dataset grouped/dataset-specific config) across 20 random parameter vectors × 3
+datasets, zero mismatches.
 
 ### A6. `base_name()` splits on substrings, not suffixes
 `debtox2019api.py:1513-1514`
@@ -497,6 +556,8 @@ criteria", "extend profile to bound", "merge profile into cloud".
 `DEBtox2019models.__init__` already evaluated into `self.newtimeext[nd]` (that precomputation
 was the previous review's optimization item). Use the cached one — otherwise the two can drift.
 
+**!!!DONE!!!** The twelve-line recomputation is now `newtimeext = model.newtimeext[nd]`.
+
 ### A12. Docstring/reality drift
 - `models.py` class docstring documents `endpoints` as "currently unused… kept as-is pending
   cleanup" — good honesty, but the right move is to delete it (A10).
@@ -517,6 +578,8 @@ Per A5: `build_dataset_parameters` performs 21 full object-array string comparis
 loops on *every* likelihood evaluation, of which `run_parspace` does tens to hundreds of
 thousands. Replacing it with a precomputed `(ndatasets, 21)` index array makes the whole
 function one fancy-index operation. This is pure overhead removal with no behavioural change.
+
+**!!!DONE!!!** See A5.
 
 ### O2. Precompute the `commontime` selections in `log_likelihood`
 `models.py:1098` and `1106` build, per treatment, per endpoint, per call:
@@ -589,13 +652,18 @@ fallback, unresolvable is an error. Specific observations:
 - **Timing:** the three `RuntimeError`s in `build_dataset_parameters` are raised from inside the
   likelihood, i.e. potentially thousands of evaluations into a fit. Nothing about them is
   data-dependent — they should be checked once at `DEBtox2019models.__init__` (this falls out
-  naturally from O1).
+  naturally from O1). **!!!DONE!!!**
 - **Fragility:** `par_dataset_map` is `np.array(full_owner, dtype=object)` where entries are
   either `-1` or a list. This is a 1-D ragged object array *only because* the global parameters
   always contribute scalar `-1` entries first. A configuration with no global parameters and
   uniformly-sized groups would produce a 2-D object array and change the meaning of
   `self.par_dataset_map[idx]` in `build_dataset_parameters`. Store it as an explicit
   `list` of `int | list[int]`, or normalize every entry to a list (`[-1]` for shared).
+  **Downgraded to "not a practical concern":** `global_parameters` is a required top-level JSON
+  key, always populated with several always-shared constants (`FBV`, `KRV`, `kap`, `yP`,
+  `LM_ref`) in every shipped config, so the "no global parameters" precondition for this collapse
+  cannot actually occur in practice. Left as-is (O1 was implemented without normalizing this
+  representation).
 - **Coverage gap:** nothing validates that every dataset index in `0..ndatasets-1` is covered by
   exactly one group for a grouped parameter. Declaring `"groups": [[0],[1]]` with
   `ndatasets=3` passes construction and only fails at the first likelihood evaluation for
@@ -613,9 +681,26 @@ fallback, unresolvable is an error. Specific observations:
 1. **B1** (`Lf` typo) and **B2** (in-place state mutation) — model physics, cheap fixes. **DONE!**
 2. **B4** (`subset()` stale survival arrays) — silently wrong likelihoods on a live API path. **DONE!**
 3. **B3** (`breaktime` ignored) — a documented option that does nothing, on data that needs it. **DONE!**
-4. **B5** (broken `input_pars.json`), **B6** (`model.variant`) — trivially reproducible breakage. **DONE!**
+4. **B5** (broken `input_pars.json`), **B6** (`model.variant`) — trivially reproducible breakage.
+   **DONE!** (B5 turned out not to be a real bug — see its entry above.)
 5. **B7**, **B12**, **B13** — parspace correctness; then **A9** (split the monoliths) so the
-   next round of these is findable.
+   next round of these is findable. **DONE the B, not yet A9**
 6. **A5 / O1** — precompute the parameter index map; unblocks both the performance win and
-   construction-time validation of the dataset-parameter feature.
+   construction-time validation of the dataset-parameter feature. **DONE!**
 7. Everything else.
+
+### Status as of this pass (bugs)
+
+| Item | Status |
+|---|---|
+| B1–B4, B6, B7, B9, B11–B14, B16 | **DONE** |
+| B5, B10, B17 | **NOT REAL BUG** (see each entry — confirmed against actual data-format/usage invariants) |
+| B15 | **WONTFIX** (deliberate — will be covered in shipping docs, not a code change) |
+| B8 | Still open (dead code today; would crash if the upstream guard it depends on ever changed) |
+
+### Status as of this pass (architecture / quality, optimizations)
+
+| Item | Status |
+|---|---|
+| A3, A4, A5, A11, O1 | **DONE** |
+| A1, A2, A6, A7, A8, A9, A10, A12, O2–O8 | Still open |

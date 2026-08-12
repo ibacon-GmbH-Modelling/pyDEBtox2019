@@ -8,6 +8,14 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from copy import deepcopy
 
+# ENDPOINTS is the single source of truth for which observable endpoints
+# (length/reproduction/survival) exist and what their completedataset
+# attribute is named - see A3 in the code review: completedataset used to
+# duplicate that list by hand, three different ways. endpoints.py has no
+# dependency on this module or on models.py, so importing it here doesn't
+# create a cycle either way.
+from .endpoints import ENDPOINTS
+
 def select_control_raw(dataframe, option='both'):
     '''
     Select only control treatments from a raw dataframe.
@@ -31,45 +39,6 @@ def select_control_raw(dataframe, option='both'):
     controlframe = dataframe.iloc[:, np.append([True], control_cols.values)]
     return(controlframe)
 
-def compile_dataset_dict(ccl, scl, lcl, rcl, ndataset):
-    """
-    Compile all dataset classes into a single dictionary for further processing.
-    Args:
-        ccl (concclass): Concentration data class instance.
-        scl (survdataclass): Survival data class instance.
-        lcl (lengthdataclass): Length data class instance.
-        rcl (reproclass): Reproduction data class instance.
-    Returns:
-        dict: A dictionary containing all dataset classes and a complete time vector.
-    """
-    dataset_dict = {}
-    dataset_dict['complete_timevec'] = np.array([])
-    dataset_dict['endpoints']=np.array([])
-    if ndataset < 1:
-        print("ndataset must be at least 1")
-        return None
-    dataset_dict['ndatasets'] = ndataset
-    if ccl is None:
-        print("Concentration data class is required")
-        return None
-    dataset_dict['concdata'] = ccl
-    dataset_dict['complete_timevec'] = np.concatenate((dataset_dict['complete_timevec'], ccl.time))
-    if lcl is not None:
-        dataset_dict['lengthdata'] = lcl
-        dataset_dict['complete_timevec'] = np.concatenate((dataset_dict['complete_timevec'], lcl.time))
-        dataset_dict['endpoints'] = np.append(dataset_dict['endpoints'],1) # length endpoint
-    if rcl is not None:
-        dataset_dict['reprodata'] = rcl
-        dataset_dict['complete_timevec'] = np.concatenate((dataset_dict['complete_timevec'], rcl.time))
-        dataset_dict['endpoints'] = np.append(dataset_dict['endpoints'],2) # reproduction endpoint
-    if scl is not None:
-        dataset_dict['survdata'] = scl
-        dataset_dict['complete_timevec'] = np.concatenate((dataset_dict['complete_timevec'], scl.time))
-        dataset_dict['endpoints'] = np.append(dataset_dict['endpoints'],3) # survival endpoint
-    dataset_dict['complete_timevec'] = np.unique(np.sort(dataset_dict['complete_timevec']))
-    return(dataset_dict)
-
-
 class concclass:
     """
     A class to handle concentration data, pre-calculate quantities needed for 
@@ -82,15 +51,9 @@ class concclass:
         timetr (numpy.ndarray): Unmodified time vector extracted from the input data, used for plotting.
         time (numpy.ndarray): The unique time values extracted from the input data.
         concarraytr (numpy.ndarray): Array of concentrations at different time points for every treatment.
-        concslopestr (numpy.ndarray): Array to store the slopes of concentration changes over time 
-            for each treatment.
-        conctwa (numpy.ndarray): Array to store the time-weighted average concentration for each treatment.
-        concconst (numpy.ndarray): Array to indicate if a treatment has constant concentration (1) or not (0).
         concmax (numpy.ndarray): Array to store the maximum concentration for each treatment.
         concunits (str): The units of the concentration data.
-        concslopes (numpy.ndarray): Array of slopes of concentration changes over time, reshaped 
-            to match the number of treatments and unique time points.
-        concarray (numpy.ndarray): Array of concentration data, reshaped to match the number of 
+        concarray (numpy.ndarray): Array of concentration data, reshaped to match the number of
             treatments and unique time points.
     Methods:
         __init__(concdata, name, concunits):
@@ -115,10 +78,6 @@ class concclass:
         self.timetr = self.concdata[:,0] # needed only for plotting
         self.time = self.concdata[:,0]
         self.concarraytr = np.transpose(self.concdata[:,1:])
-        self.concslopestr = np.zeros_like(self.concarraytr)
-        self.conctwa = np.zeros(self.ntreats)
-        # array to store if a treatment has constant concentration or not
-        self.concconst = np.zeros(self.ntreats) 
         self.concmax = np.zeros(self.ntreats)
         self.concunits = concunits
         # all the following is to account for all the cases in which the data is not complete
@@ -155,16 +114,24 @@ class concclass:
                             self.concarraytr[i][nan_idx] = np.interp(self.time[nan_idx], [self.time[prev_idx], self.time[next_idx]], [self.concarraytr[i][prev_idx], self.concarraytr[i][next_idx]])
                         else:
                             self.concarraytr[i][nan_idx] = np.nan
-            self.concslopestr[i,:-1] = np.diff(self.concarraytr[i])/np.diff(self.time)   
-            self.conctwa[i] = np.trapz(self.concarraytr[i],self.time)/self.time[-1]  # time weighted average
             self.concmax[i] = np.max(self.concarraytr[i])
-            if (np.all(self.concslopestr[i]==0)) & (len(np.unique(self.concarraytr[i]))<2):
-                self.concconst[i] = 1
         self.time = np.unique(self.time)
-        tmpslopes = self.concslopestr[np.isfinite(self.concslopestr)]
-        tmparray = self.concarraytr[np.isfinite(self.concslopestr)]
-        self.concslopes = tmpslopes.reshape((self.ntreats,len(self.time)))
-        self.concarray = tmparray.reshape((self.ntreats,len(self.time)))
+        # concarray: concarraytr (one column per *raw* row of the input file,
+        # so a repeated time value - used to encode an instantaneous
+        # concentration step, e.g. two rows both at t=5 with different
+        # concentrations - has two columns) reduced to one column per
+        # *unique* time in self.time. For a repeated time value we keep the
+        # last matching raw column, i.e. the concentration that applies
+        # going forward from that time - the same value calc_model's
+        # breaktime segmenting uses for the segment that starts there -
+        # rather than the value just before the step.
+        # np.unique() on the *reversed* raw time vector reports, for each
+        # sorted unique time, the index of its first occurrence when
+        # scanning from the end; converting that back to an index into the
+        # original (un-reversed) array gives that time's last occurrence.
+        _, first_idx_in_reversed = np.unique(self.timetr[::-1], return_index=True)
+        last_idx = (len(self.timetr) - 1) - first_idx_in_reversed
+        self.concarray = self.concarraytr[:, last_idx]
 
     def plot_exposure(self, savefig=False, figname='', extension='.png'):
         fig = plt.figure()
@@ -712,7 +679,7 @@ class reproclass(dataclass):
                 self.dataarray_cumulative = R
             case 2:
                 for i in range(self.dataarray.shape[0]): # run through individuals
-                    Rtmp     = self.dataarray[i,:];      # extract one individual
+                    Rtmp     = self.dataarray[i,:].copy();      # extract one individual (copy: cases 0/1 also copy - see B11)
                     ind_eggs = np.where(Rtmp == -1)[0]  # index for time with first egg, or moults without neonates
                     if ind_eggs.size > 0:  # if there are such observations on first egg/moults ...
                         Rtmp[ind_eggs] = 0  # turn the -1 into a zero for cumsum
@@ -851,33 +818,63 @@ class reproclass(dataclass):
         return ax
     
 
+# Maps each ENDPOINTS entry's dataset_attr to the class its data must be an
+# instance of - used by completedataset.__init__'s isinstance checks below.
+# concdata isn't in ENDPOINTS (it's exposure data, not an observable
+# endpoint with a state_idx), so it's handled separately.
+_ENDPOINT_DATA_CLASSES = {
+    'lengthdata': lengthdataclass,
+    'reprodata': reproclass,
+    'survdata': survdataclass,
+}
+
+
 class completedataset:
     def __init__(self,
                  concdata=None,
                  lendata=None,
                  reprodata=None,
                  survdata=None):
-        if type(concdata) is concclass:
+        # None means "this endpoint isn't provided for this dataset" and is
+        # silently skipped - that's a legitimate, common case (e.g. a
+        # survival-only completedataset). Anything else that isn't the
+        # expected class is not a legitimate case (e.g. a raw ndarray
+        # passed where a lengthdataclass was expected) and must raise
+        # instead of silently being dropped - see review item A4.
+        if concdata is not None:
+            if not isinstance(concdata, concclass):
+                raise TypeError(
+                    f"concdata must be a concclass instance or None, got {type(concdata).__name__}"
+                )
             self.concdata = concdata
-        if type(lendata) is lengthdataclass:
-            self.lengthdata = lendata
-        if type(reprodata) is reproclass:
-            self.reprodata = reprodata
-        if type(survdata) is survdataclass:
-            self.survdata = survdata
+
+        # dataset_attr -> raw constructor input, for the ENDPOINTS loop
+        # below (lendata is the one constructor parameter whose name
+        # doesn't match its dataset_attr, 'lengthdata').
+        raw_inputs = {'lengthdata': lendata, 'reprodata': reprodata, 'survdata': survdata}
+        for spec in ENDPOINTS.values():
+            candidate = raw_inputs[spec.dataset_attr]
+            if candidate is None:
+                continue
+            expected = _ENDPOINT_DATA_CLASSES[spec.dataset_attr]
+            if not isinstance(candidate, expected):
+                raise TypeError(
+                    f"{spec.dataset_attr} must be a {expected.__name__} instance or None, "
+                    f"got {type(candidate).__name__}"
+                )
+            setattr(self, spec.dataset_attr, candidate)
+
         # create complete time vector
         self.complete_timevec = np.array([])
         if hasattr(self, 'concdata'):
             self.complete_timevec = np.concatenate((self.complete_timevec, self.concdata.time))
-        if hasattr(self, 'lengthdata'):
-            self.complete_timevec = np.concatenate((self.complete_timevec, self.lengthdata.time))
-        if hasattr(self, 'reprodata'):
-            self.complete_timevec = np.concatenate((self.complete_timevec, self.reprodata.time))
-        if hasattr(self, 'survdata'):
-            self.complete_timevec = np.concatenate((self.complete_timevec, self.survdata.time))
+        for spec in ENDPOINTS.values():
+            if hasattr(self, spec.dataset_attr):
+                self.complete_timevec = np.concatenate(
+                    (self.complete_timevec, getattr(self, spec.dataset_attr).time))
         self.complete_timevec = np.unique(np.sort(self.complete_timevec))
         self.calc_common_timeindices()
-    
+
     def calc_common_timeindices(self):
         """
         Calculate the indices of the complete time vector in each dataset class.
@@ -887,21 +884,14 @@ class completedataset:
         self.time_indices = {}
         if hasattr(self, 'concdata'):
             xy, self.time_indices['concdata'], y_ind = np.intersect1d(self.complete_timevec, self.concdata.time, return_indices=True)
-        if hasattr(self, 'lengthdata'):
-            self.time_indices['lengthdata'] = []
-            for i in range(self.lengthdata.ntreats):
-                xy, tmpcommonindices, y_ind = np.intersect1d(self.complete_timevec, self.lengthdata.timetreat[i], return_indices=True)
-                self.time_indices['lengthdata'].append(tmpcommonindices)
-        if hasattr(self, 'reprodata'):
-            self.time_indices['reprodata'] = []
-            for i in range(self.reprodata.ntreats):
-                xy, tmpcommonindices, y_ind = np.intersect1d(self.complete_timevec, self.reprodata.timetreat[i], return_indices=True)
-                self.time_indices['reprodata'].append(tmpcommonindices)
-        if hasattr(self, 'survdata'):
-            self.time_indices['survdata'] = []
-            for i in range(self.survdata.ntreats):
-                xy, tmpcommonindices, y_ind = np.intersect1d(self.complete_timevec, self.survdata.timetreat[i], return_indices=True)
-                self.time_indices['survdata'].append(tmpcommonindices)
+        for spec in ENDPOINTS.values():
+            if hasattr(self, spec.dataset_attr):
+                ep = getattr(self, spec.dataset_attr)
+                self.time_indices[spec.dataset_attr] = []
+                for i in range(ep.ntreats):
+                    xy, tmpcommonindices, y_ind = np.intersect1d(
+                        self.complete_timevec, ep.timetreat[i], return_indices=True)
+                    self.time_indices[spec.dataset_attr].append(tmpcommonindices)
 
 
     def subset(self, selector):
@@ -947,13 +937,11 @@ class completedataset:
         if hasattr(self, 'concdata'):
             new.concdata = deepcopy(self.concdata)
             new.concdata.concarray = new.concdata.concarray[mask, :]
-            new.concdata.concslopes = new.concdata.concslopes[mask, :]
             new.concdata.ntreats = int(mask.sum())
             new.concdata.conctreatsnames = labels[mask]
             # also slice raw/tr arrays if you rely on them later (optional):
             new.concdata.concarraytr = new.concdata.concarraytr[mask, :]
             new.concdata.concmax = new.concdata.concmax[mask]
-            new.concdata.concconst = new.concdata.concconst[mask]
             # timetr/time stay unchanged (time dimension is not filtered here)
     
         # Helper to slice generic dataclass-like endpoints safely

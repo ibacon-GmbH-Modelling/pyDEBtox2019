@@ -321,6 +321,18 @@ class PyParspace:
         self.model = deepcopy(ModelSetUp)
         self.profile = self.opts.profile
         self.npars = sum(self.model.isfree)
+        # crit_table/n_ok/n_conf_all (SettingParspace) are all indexed by
+        # self.npars-1 and only have entries up to this many free
+        # parameters; fail fast here with a clear message instead of an
+        # IndexError deep inside run_parspace (see review item B14).
+        max_npars = len(self.opts.crit_table)
+        if self.npars > max_npars:
+            raise ValueError(
+                f"{self.npars} free parameters requested, but fitting more than "
+                f"{max_npars} parameters simultaneously with the parameter space "
+                f"explorer is not advisable. Fix some parameters, group them, or "
+                f"split the fit into stages instead."
+            )
         self.posfree = np.argwhere(self.model.isfree == 1).flatten()
         self.parlabels = np.copy(self.model.parnames)
         # deal with logarithmic parameters
@@ -331,8 +343,12 @@ class PyParspace:
         # object that is a copy of the initial parameters of the model, but I do not care if it gets overwritten
         self.propagationset = np.array([]) #placeholder
         self.fullset = np.copy(self.model.parvals) # stores the full set of parameters. This is because not all parameter might be free
-        self._startp = np.copy(self.model.parvals) # needed for internal operations 
+        self._startp = np.copy(self.model.parvals) # needed for internal operations
         self.allow_multiprocessing = True # flag to allow multiprocessing in likelihood calculations
+        # guards against _print_results folding the profile into coll_all more
+        # than once - run_parspace resets this before its own (first) call;
+        # later reprint_results() calls must not keep re-appending the profile
+        self._profile_merged_into_coll_all = False
 
     # Using here sequential approach as the model is still not computationally heavy
     # enough to offset the overhead of parallelization
@@ -675,7 +691,7 @@ class PyParspace:
                     coll_okL[ind_ok+1] =mll_tst
                     ind_ok = ind_ok+2
                 if mll_tst < mll: # found a better minimum
-                    pbest = parprof[i_g,:]
+                    pbest = np.concatenate((pmat_tst, [mll_tst]),axis=0) # explicit copy: parprof[i_g,:] isn't written until below
                     if ((mll_rem - mll_tst) > self.opts.real_better) & ((mll - mll_tst) > self.opts.real_better):
                         # print on screen that there is a much better minimum
                         print('  Better optimum found when profiling ',parnr, ': ',mll_tst,' (best was ',mll,')')
@@ -702,7 +718,7 @@ class PyParspace:
                     coll_okL[ind_ok] =mll_tst2
                     ind_ok = ind_ok+1
                 if mll_tst2 < mll:
-                    pbest = parprof[i_g,:]
+                    pbest = np.copy(parprof[i_g,:]) # explicit copy: a view here would keep tracking later writes to this row
                     if (mll_rem - mll_tst2 > self.opts.real_better) & (mll - mll_tst2 > self.opts.real_better):
                         # print on screen that there is a much better minimum
                         print('  Better optimum found when profiling ',parnr, ': ',mll_tst2,' (best was ',mll,')')
@@ -797,9 +813,15 @@ class PyParspace:
             res_parspace[:,0] = (10**(self.coll_all[0,:-1])*self.model.islog[self.posfree] + 
                                  self.coll_all[0,:-1]*(1-self.model.islog[self.posfree])).transpose() # best fit values
             print("Results obtained with the parameters space explorer with profiling option.")
+            # fold the profile into coll_all at most once: reprint_results() calls
+            # this method again with the same profile, and re-appending it every
+            # time would keep growing coll_all and shifting the reported CIs
+            merge_profile = not self._profile_merged_into_coll_all
+            self._profile_merged_into_coll_all = True
             for i in range(self.npars):
-                self.coll_all = np.append(self.coll_all, profile[i], axis=0)
-                self.coll_all = self.coll_all[np.argsort(self.coll_all[:,-1])]
+                if merge_profile:
+                    self.coll_all = np.append(self.coll_all, profile[i], axis=0)
+                    self.coll_all = self.coll_all[np.argsort(self.coll_all[:,-1])]
                 mll = self.coll_all[0,-1]
                 prof_tst = np.copy(self.profile[i])
                 prof_tst[:,-1] = prof_tst[:,-1] - mll - chicrit_single
@@ -1266,7 +1288,11 @@ class PyParspace:
             ind_prop1 = np.argwhere(self.coll_all[:,-1] < mll + 0.5 * self.opts.crit_prop[0]).flatten().max()
             ind_prop2 = np.argwhere(self.coll_all[:,-1] < mll + 0.5 * self.opts.crit_prop[1]).flatten().max()
             self.pbest = self.coll_all[0,:]
-            self.propagationset = self.coll_all[ind_prop1:ind_prop2,:-1]
+            # B13: every other usage of this (ind_prop1, ind_prop2) pair in the
+            # file (the profiling-branch propagationset below, the CI bounds in
+            # _print_results, the hlines in _plot_samples) slices up to
+            # ind_prop2 + 1; this was the one outlier missing the "+ 1".
+            self.propagationset = self.coll_all[ind_prop1:ind_prop2+1,:-1]
             self.model.parvals[self.posfree] = self.pbest[:-1]
             self.fullset = np.copy(self.model.parvals)
             print("Final results:")
@@ -1417,8 +1443,9 @@ class PyParspace:
                                figbasename=figbasename,
                                extension=extension)
             self.profile = parprofile
+            self._profile_merged_into_coll_all = False # B12: this is a fresh profile from this run; fold it in once
             self._print_results(self.profile)
-            
+
             ind_prop1 = np.argwhere(self.coll_all[:,-1] < mll + 0.5 * self.opts.crit_prop[0]).flatten().max()
             ind_prop2 = np.argwhere(self.coll_all[:,-1] < mll + 0.5 * self.opts.crit_prop[1]).flatten().max()
             self.propagationset = self.coll_all[ind_prop1:ind_prop2+1,:-1]
