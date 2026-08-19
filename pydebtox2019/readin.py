@@ -345,45 +345,185 @@ class dataclass:
 class survdataclass(dataclass):
     """
     """
-    def __init__(self,survdata):
+    def __init__(self, survdata, missing=None):
+        '''
+        Arguments:
+        - survdata: survival table (header row with treatment labels, first
+          column with the observation times), numbers of survivors.
+        - missing: optional matrix of missing/removed animals per interval,
+          i.e. BYOM's W{i} for a data set with lam = -1. Note that for
+          survival data this is NOT a statistical weight: it is the count of
+          animals that were lost/removed rather than observed to die, and it
+          defaults to zeros (as in prelim_checks.m), not to ones.
+          Accepted either with the same layout as `survdata` (header row and
+          time column included, which are then stripped) or as the bare
+          (ntimes x ntreats) block.
+        '''
         super().__init__(survdata)
+        self.weights = self._parse_missing(missing, survdata)
         self._rebuild_derived()
+
+    def _parse_missing(self, missing, survdata):
+        '''
+        Normalise the missing/removed-animals matrix to the (ntreats, ntimes)
+        layout of self.dataarray. Mirrors the size handling of BYOM's
+        prelim_checks.m, which accepts the weight matrix either with or
+        without the time/scenario headers.
+        '''
+        ntimes, ntreats = self.dataarray.shape[1], self.dataarray.shape[0]
+        if missing is None:
+            return np.zeros_like(self.dataarray, dtype=float)
+        missing = np.asarray(missing, dtype=float)
+        if missing.shape == survdata.shape:
+            # headers included: strip the label row and the time column
+            missing = missing[1:, 1:]
+        elif missing.shape != (ntimes, ntreats):
+            raise ValueError(
+                "missing/removed-animals matrix has shape %s; expected %s "
+                "(bare block) or %s (with time column and header row), to "
+                "match the survival data" % (
+                    missing.shape, (ntimes, ntreats), survdata.shape))
+        missing = np.transpose(missing)
+        if np.any(missing < 0):
+            raise ValueError("missing/removed animals cannot be negative")
+        return missing
+
+    def _pad_to_time(self, values, isfin):
+        '''
+        Lift a per-treatment vector that was computed on the NaN-stripped
+        series back onto the full self.time grid, leaving NaN where the
+        observation is missing.
+
+        Everything that is compared or plotted against the shared time
+        vector has to live on this grid: debtox2019api.get_survival_data
+        builds the model values on self.time, and calc_survival_metrics
+        then masks data and model alike with ~isnan(probs). Handing those
+        a stripped vector silently pairs each observation with the wrong
+        model time point. Padding also lets the three arrays below stack
+        into a rectangular (ntreats x ntimes) array no matter where - or
+        how many - NaNs each treatment has; matplotlib skips the NaNs.
+
+        The likelihood triple (timetreat / deatharraytreat /
+        missingarraytreat) is deliberately NOT padded: it stays stripped
+        and self-consistent, which is exactly what transfer.m does per
+        treatment, and what indexcommon_surv is built against.
+        '''
+        out = np.full(len(self.time), np.nan)
+        out[isfin] = values
+        return out
 
     def _rebuild_derived(self):
         '''
-        Recompute every per-replicate quantity derived from dataarray/data/time.
-        Called from __init__ and from completedataset.subset() so both paths stay
-        in sync instead of drifting apart (see review item B4).
+        Recompute every quantity derived from dataarray/data/time. Called from
+        __init__ and from completedataset.subset() so both paths stay in sync
+        instead of drifting apart (see review item B4).
+
+        Two groups come out of here and they are indexed differently:
+        - per REPLICATE (one entry per column of the data set): timetreat,
+          deatharraytreat, missingarraytreat, survarrtreat, survprobstreat.
+          The first three drive the likelihood, the last two are paired with
+          the model output in debtox2019api.get_survival_data.
+        - per UNIQUE TREATMENT (one row per exposure level): meanvalstransf,
+          lowlimtreat, upplimtreat. These are the display arrays, and the
+          replicates are pooled into them (see below).
         '''
         # additional elements specific to survival data
         self.timetreat = []
         self.survarrtreat = []
         self.deatharraytreat = []
+        self.missingarraytreat = []
         self.survprobstreat = []
         self.lowlimtreat = []
         self.upplimtreat = []
         self.meanvalstransf = []
         z= 1.96
         for i in range(self.ntreats):
-            tmpsurv = self.dataarray[i, np.isnan(self.dataarray[i])==False]
-            tmptime = self.time[np.isnan(self.dataarray[i])==False]
-            self.survarrtreat.append(tmpsurv)
+            isfin = np.isnan(self.dataarray[i])==False
+            # BYOM prelim_checks.m: missing/removed animals may not be entered
+            # at a time point where the observation itself is NaN - the two
+            # would then be stripped inconsistently below.
+            if np.any(self.weights[i][isfin==False] > 0):
+                raise ValueError(
+                    "treatment %s: missing/removed animals are entered at a "
+                    "time point where the number of survivors is NaN"
+                    % str(self.treatmentsnames[i]))
+            tmpsurv = self.dataarray[i, isfin]
+            tmptime = self.time[isfin]
+            tmpmiss = self.weights[i, isfin].astype('float')
+            # BYOM prelim_checks.m: no zombies. Checked on the NaN-stripped
+            # series, so that a NaN in between two observations does not hide
+            # an increase (in BYOM the NaN difference silently compares false).
+            if np.any(np.diff(tmpsurv) > 0):
+                raise ValueError(
+                    "treatment %s: the number of survivors should never "
+                    "increase in time" % str(self.treatmentsnames[i]))
+            # survarrtreat is paired with the model output on the full time
+            # grid (see _pad_to_time), so it is padded; timetreat stays
+            # stripped because indexcommon_surv is built from it.
+            self.survarrtreat.append(self._pad_to_time(tmpsurv, isfin))
             self.timetreat.append(tmptime)
-            self.deatharraytreat.append(np.append( -(np.diff(tmpsurv[:]).astype('float')), tmpsurv[-1]) )
+            # deaths per interval, corrected for the animals that went missing
+            # rather than died (transfer.m: Ndeaths = -diff([D_i;0]) - w_i)
+            ndeaths = np.append( -(np.diff(tmpsurv[:]).astype('float')), tmpsurv[-1]) - tmpmiss
+            if np.any(ndeaths < 0):
+                raise ValueError(
+                    "treatment %s: negative number of deaths after correcting "
+                    "for missing/removed animals - check the missing-animals "
+                    "matrix against the survival data"
+                    % str(self.treatmentsnames[i]))
+            self.deatharraytreat.append(ndeaths)
+            self.missingarraytreat.append(tmpmiss)
             ninit = self.data[0,i+1] # time 0 in principle should never have a nan value
             tmpprob = tmpsurv/ninit
-            self.survprobstreat.append(tmpprob)
+            self.survprobstreat.append(self._pad_to_time(tmpprob, isfin))
+
+        # ------------------------------------------------------------------
+        # Display arrays: one row per UNIQUE TREATMENT, not per replicate.
+        #
+        # A panel of the figure answers "what happened at this exposure
+        # level?", so replicates of one level belong on the same axes - which
+        # is what dataclass.plot_data already does when it draws the raw
+        # points. The mean/CI arrays have to be indexed the same way, or
+        # panel i gets the error bars of replicate i (a different treatment
+        # entirely once the data set has replicates, e.g. test_Sgrp.txt).
+        # This also matches lengthdataclass/reproclass, whose
+        # calc_mean_and_ci already produces one row per unique treatment.
+        #
+        # The replicates are pooled, not averaged: survivors and initial
+        # counts are summed across the replicates that have an observation at
+        # that time, and the Wilson interval is computed on the pooled
+        # proportion. Pooling is the correct binomial treatment (it is one
+        # larger sample); averaging the per-replicate proportions would give
+        # a narrower interval that is not a valid binomial CI.
+        # ------------------------------------------------------------------
+        for lab in self.uniquetreats:
+            rows = np.where(self.treatmentsnames == lab)[0]
+            obs = self.dataarray[rows, :]                    # (n_rep, n_time)
+            isfin_t = np.isnan(obs)==False
+            # initial numbers per replicate, broadcast over time, counted only
+            # where that replicate actually has an observation
+            ninit_rep = np.array([self.data[0, r+1] for r in rows], dtype=float)
+            n_pooled = np.sum(np.where(isfin_t, ninit_rep[:, None], 0.0), axis=0)
+            s_pooled = np.sum(np.where(isfin_t, obs, 0.0), axis=0)
+            isfin = n_pooled > 0                             # some replicate reported
+            n_i = n_pooled[isfin]
+            tmpprob = s_pooled[isfin]/n_i
             # Wilson score interval on data probabilities. From openGUTS code
             # https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval
-            a = (tmpprob + z**2/(2*ninit))/(1+z**2/ninit)
-            b = z/(1+z**2/ninit) * np.sqrt(tmpprob*(1-tmpprob)/ninit + z**2/(4*ninit**2))
+            a = (tmpprob + z**2/(2*n_i))/(1+z**2/n_i)
+            b = z/(1+z**2/n_i) * np.sqrt(tmpprob*(1-tmpprob)/n_i + z**2/(4*n_i**2))
             a[0]=1
             b[0]=0
-            tmplowlim = np.maximum(0,a-b)
-            tmpupplim = np.minimum(1,a+b)
-            self.lowlimtreat.append(tmplowlim)
-            self.upplimtreat.append(tmpupplim)
-            self.meanvalstransf.append(tmpprob) #?? check
+            # The Wilson interval is defined to contain the sample proportion,
+            # but a+b can land a few ULPs below it (e.g. 0.9999999999999999
+            # against a pooled proportion of exactly 1). Enforce the bracket
+            # explicitly: without it the error bars come out negative by ~1e-16
+            # and matplotlib's errorbar refuses to draw them.
+            tmplowlim = np.minimum(np.maximum(0,a-b), tmpprob)
+            tmpupplim = np.maximum(np.minimum(1,a+b), tmpprob)
+            self.lowlimtreat.append(self._pad_to_time(tmplowlim, isfin))
+            self.upplimtreat.append(self._pad_to_time(tmpupplim, isfin))
+            self.meanvalstransf.append(self._pad_to_time(tmpprob, isfin))
         # transform lists in arrays
         self.meanvalstransf = np.array(self.meanvalstransf)
         self.lowlimtreat = np.array(self.lowlimtreat)

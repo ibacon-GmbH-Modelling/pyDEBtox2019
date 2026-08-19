@@ -171,7 +171,7 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
 
 
 @jit(nopython=True, cache=True)
-def survival_loglikelihood(modelvector, commontime, deathvector):
+def survival_loglikelihood(modelvector, commontime, deathvector, missingvector):
     # print(commontime)
     surviv_selected = modelvector[commontime]
     #print(surviv_selected)
@@ -179,6 +179,13 @@ def survival_loglikelihood(modelvector, commontime, deathvector):
     pdeath = np.maximum(pdeath,1e-50)
     #print(deathvector)
     llik=np.dot(deathvector,np.log(pdeath))
+    # Animals that went missing or were removed still carry information: they
+    # were alive up to the point they were taken out. BYOM transfer.m adds
+    # w_i'*log(M_i) for those. Guarded because missingvector is all zeros for
+    # the usual data set, and this is the hot path.
+    if np.any(missingvector > 0):
+        surviv_selected = np.maximum(surviv_selected, 1e-50)
+        llik += np.dot(missingvector, np.log(surviv_selected))
     return(llik)
 
 
@@ -187,6 +194,12 @@ def scaled_loglikelihood(model,lengths,weights,transf):
     # print("model:", model)
     # print("lengths:", lengths)
     llk=0.0
+    # clamp the model output at zero before any transformation, as BYOM's
+    # transfer.m does (M = max(0,M(:))). The solver can return slightly
+    # negative state values, and for a fractional transf (e.g. 0.5) a
+    # negative base would silently turn the residuals - and the whole
+    # likelihood - into NaN.
+    model = np.maximum(model, 0.0)
     ind_fin = np.isfinite(lengths) & (weights>0)
     weights = weights[ind_fin]
     n = np.sum(ind_fin)
@@ -1094,7 +1107,8 @@ class DEBtox2019models:
                 for endpoint in self.active_endpoints[nd]:
                     if endpoint == 0:
                         llsurv = survival_loglikelihood(modelsol[3, :], self.indexcommon_surv[nd][i],
-                                                        self.survstruct_list[nd].deatharraytreat[i])
+                                                        self.survstruct_list[nd].deatharraytreat[i],
+                                                        self.survstruct_list[nd].missingarraytreat[i])
                         # print("llsurv treatment ", i)
                         # print(llsurv)
                         llik += llsurv
