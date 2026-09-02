@@ -4,6 +4,7 @@ import time
 import numpy as np
 import pandas as pd
 import json
+import matplotlib.pyplot as plt
 
 import pydebtox2019.models as mm
 import pydebtox2019.parspace as ps
@@ -45,8 +46,15 @@ if __name__ == "__main__":
     scl = readin.survdataclass(Sdata.to_numpy())
     scl.plot_data(scaleto1=True, label="suviving fraction")
 
+    # The plot_* methods build figures but no longer display them - that is
+    # the caller's job. One plt.show() puts every figure made so far on
+    # screen at once; execution resumes when they are closed. (Under IPython
+    # or Jupyter with matplotlib integration this line is a no-op, as the
+    # figures have already appeared.)
+    plt.show()
 
-    # isolate the controls    
+
+    # isolate the controls
     full_ds, control_ds, ph = dt2019.build_dataset_variants(ccl, lcl, rcl, scl, control_type='both')
     
     # take only the survival data from the controls

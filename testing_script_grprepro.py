@@ -4,6 +4,7 @@ import time
 import numpy as np
 import pandas as pd
 import json
+import matplotlib.pyplot as plt
 
 import pydebtox2019.models as mm
 import pydebtox2019.parspace as ps
@@ -47,7 +48,14 @@ if __name__ == "__main__":
     rcl = readin.reproclass(Rdata.to_numpy(), reprocase='group',optcase=2,
                             survtable=Sdata, femaletable=Fdata)
     rcl.plot_data_cumulative()
-    
+
+    # The plot_* methods build figures but no longer display them - that is
+    # the caller's job. One plt.show() puts every figure made so far on
+    # screen at once; execution resumes when they are closed. (Under IPython
+    # or Jupyter with matplotlib integration this line is a no-op, as the
+    # figures have already appeared.)
+    plt.show()
+
 
     '''
     # isolate the controls    

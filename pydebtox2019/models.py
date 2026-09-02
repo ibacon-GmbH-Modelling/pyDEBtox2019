@@ -995,7 +995,7 @@ class DEBtox2019models:
 
     def worker_epx(self, pars, parvals, posfree, islog, dataset, exposure_time, exposure_conc,
                    Twin, X, endpoints, Tstep, MF_bounds, max_expand, xtol, prune_win=False,
-                   plateau_tol=1e-6):
+                   plateau_tol=1e-6, zero_hb=False):
         """
         Worker function for EPx/LPx CI propagation: rebuilds a dataset-specific
         parameter vector from a free-parameter sample and runs calc_epx_core.
@@ -1003,11 +1003,18 @@ class DEBtox2019models:
         itself dispatched inside a multiprocessing.Pool (CI propagation
         across parameter sets), a nested pool for the per-window loop is
         not supported.
+
+        zero_hb: see calc_epx - kept in sync with the point-estimate call so
+        the CI bounds are computed under the same background-mortality
+        convention as the central value.
         """
         expanded = np.array(parvals, copy=True)
         expanded[posfree] = pars
         expanded = np.where(islog, 10 ** expanded, expanded)
         modelpars = self.build_dataset_parameters(expanded, dataset)
+        if zero_hb:
+            modelpars = modelpars.copy()
+            modelpars[DEB_PAR_ORDER.index("hb")] = 0.0
         return self.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin, X, endpoints,
                                    Tstep, MF_bounds, max_expand, xtol,
                                    prune_win=prune_win, multicore=False,

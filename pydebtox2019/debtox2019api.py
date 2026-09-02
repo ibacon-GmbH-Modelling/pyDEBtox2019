@@ -1164,6 +1164,7 @@ def calc_epx(
     parspace=None,
     multicore=True,
     verbose=True,
+    zero_hb=False,
 ):
     """
     Calculate EPx / LPx values (exposure-profile multiplication factors).
@@ -1256,6 +1257,21 @@ def calc_epx(
         per-window loop serially, to avoid nested process pools).
     verbose : bool
         Print a summary table.
+    zero_hb : bool
+        If True, the background hazard rate (hb) is set to 0 in the
+        parameter vector used for this calculation, matching the BYOM/
+        DEBtox2019 convention that EPx/LPx characterizes the substance's
+        own hazard, decoupled from the test species' natural mortality
+        rate. Since hb enters the survival ODE additively and independently
+        of the toxicant-driven hazard (dydt[3] = -(hazard + hb) * y[3]), the
+        resulting LPx values are numerically unaffected either way - the
+        ratio to the (zero-exposure) control cancels the hb term exactly.
+        What changes is the *reported control/exposed survival trajectories*
+        themselves (see plot_epx_results): with zero_hb=True the control
+        stays at 1.0 and the exposed curve visibly reaches the target
+        effect level, instead of both sitting below 1.0 by the same
+        background-mortality factor. Has no effect on length/reproduction,
+        since hb does not appear in their equations.
 
     Returns
     -------
@@ -1289,6 +1305,9 @@ def calc_epx(
     basepars = model.parvals.copy()
     basepars[model.islog] = 10 ** basepars[model.islog]
     modelpars = model.build_dataset_parameters(basepars, dataset)
+    if zero_hb:
+        modelpars = modelpars.copy()
+        modelpars[mm.DEB_PAR_ORDER.index("hb")] = 0.0
 
     core = model.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin_arr, X,
                                 endpoint_codes, Tstep, MF_bounds, max_expand, xtol,
@@ -1314,7 +1333,7 @@ def calc_epx(
         args = [
             (pars, model.parvals, parspace.posfree, model.islog, dataset,
              exposure_time, exposure_conc, Twin_arr, X, endpoint_codes,
-             Tstep, MF_bounds, max_expand, xtol, prune_win, plateau_tol)
+             Tstep, MF_bounds, max_expand, xtol, prune_win, plateau_tol, zero_hb)
             for pars in parspace.propagationset
         ]
 
@@ -1355,7 +1374,7 @@ def calc_epx(
 
 
 def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_index=0,
-                      n_fine=300, figsize_mf=(7, 5), figsize_window=(11, 5)):
+                      n_fine=300, figsize_mf=(7, 5), figsize_window=(11, 5), zero_hb=False):
     """
     Produce the two diagnostic figures for a calc_epx result.
 
@@ -1391,6 +1410,16 @@ def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_inde
     n_fine : int
         Number of points used to draw the smooth endpoint-vs-time curves
         in Figure 2 (right panel).
+    zero_hb : bool
+        If True, the background hazard rate (hb) is set to 0 for the
+        trajectories re-run here (see calc_epx's zero_hb). Purely cosmetic
+        for the survival panel: it makes the plotted control curve sit
+        flat at 1.0 so the exposed curve visibly reaches the target effect
+        level, instead of both being depressed by the same background-
+        mortality factor. Independent of whether calc_epx itself was run
+        with zero_hb - the LPx value (worst_time/epx_value, already taken
+        from `results`) is unaffected either way (see calc_epx docstring),
+        only the two freshly-recomputed diagnostic curves change here.
 
     Returns
     -------
@@ -1432,6 +1461,9 @@ def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_inde
     basepars = model.parvals.copy()
     basepars[model.islog] = 10 ** basepars[model.islog]
     modelpars = model.build_dataset_parameters(basepars, dataset)
+    if zero_hb:
+        modelpars = modelpars.copy()
+        modelpars[mm.DEB_PAR_ORDER.index("hb")] = 0.0
 
     t_list, c_list = model._window_profile(exposure_time, exposure_conc, worst_time, tw)
 

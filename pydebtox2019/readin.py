@@ -60,8 +60,9 @@ class concclass:
             Initializes the concclass object, processes the input data, interpolates missing values, 
             calculates slopes, time-weighted averages, and other attributes.
         plot_exposure(savefig=False, figname='', extension='.png'):
-            Plots the exposure data (concentration vs. time) for each treatment. Optionally saves 
-            the plot to a file.
+            Builds the exposure figure (concentration vs. time) for each treatment and
+            returns (fig, ax). Optionally saves it to a file. Does not display it -
+            call plt.show() yourself from a plain script.
             Args:
                 savefig (bool): Whether to save the figure to a file. Default is False.
                 figname (str): The base name of the file to save the figure. Default is an empty string.
@@ -134,25 +135,32 @@ class concclass:
         self.concarray = self.concarraytr[:, last_idx]
 
     def plot_exposure(self, savefig=False, figname='', extension='.png'):
+        '''
+        Build the exposure figure, one panel per treatment, and return
+        (fig, ax) with ax a 1-D array of Axes of length ntreats.
+
+        Deliberately does not display anything: showing a figure is the
+        caller's job. plt.show() blocks until the window is dismissed, and it
+        shows every open figure rather than just this one. Under IPython or
+        Jupyter with matplotlib integration the figure appears by itself;
+        from a plain script, call plt.show() once at the end.
+        '''
         fig = plt.figure()
-        ax = fig.subplots(1,self.ntreats)
+        # squeeze=False keeps the result 2-D whatever ntreats is: with a
+        # single treatment, subplots() would otherwise return a bare Axes
+        # and every ax[i] below would raise.
+        ax = fig.subplots(1,self.ntreats, squeeze=False)[0]
         cmax = np.max(self.concmax)
-        if self.ntreats==1:
-            ax.fill_between(self.timetr,self.concarraytr[0], label='Concentration', color='blue', alpha=0.2)
-            ax.set_ylim([0, cmax*1.1])
-            ax.set_ylabel("Concentration [%s]"%self.concunits)
-            ax.set_xlabel("Time [d]")
-        else:
-            for i in range(self.ntreats):
-                ax[i].fill_between(self.timetr,self.concarraytr[i], label='Concentration', color='blue', alpha=0.2)
-                ax[i].set_ylim([0, cmax*1.1])
-                ax[i].set_xlabel("Time [d]")
-                ax[i].set_title("T %s"%self.conctreatsnames[i])
-            ax[0].set_ylabel("Concentration [%s]"%self.concunits)
-        plt.tight_layout()
-        plt.show()
+        for i in range(self.ntreats):
+            ax[i].fill_between(self.timetr,self.concarraytr[i], label='Concentration', color='blue', alpha=0.2)
+            ax[i].set_ylim([0, cmax*1.1])
+            ax[i].set_xlabel("Time [d]")
+            ax[i].set_title("T %s"%self.conctreatsnames[i])
+        ax[0].set_ylabel("Concentration [%s]"%self.concunits)
+        fig.tight_layout()
         if savefig:
             fig.savefig(figname+"_"+self.name+"_conc"+extension)
+        return fig, ax
 
 
 class dataclass:
@@ -192,37 +200,40 @@ class dataclass:
         self.trrateatsnames = self.treatmentsnames + (dataset_id)*100
 
     def plot_data(self, dataarray=None, label="Data", wmeans=False):
+        '''
+        Build the data figure, one panel per unique treatment with that
+        treatment's replicates overplotted, and return (fig, ax) with ax a
+        1-D array of Axes of length len(uniquetreats).
+
+        Deliberately does not display anything - see concclass.plot_exposure
+        for why.
+        '''
         if dataarray is None:
             dataarray = self.dataarray
         fig = plt.figure()
-        ax = fig.subplots(1,self.uniquetreats.shape[0])
+        # squeeze=False keeps the result 2-D whatever the number of unique
+        # treatments is. The previous code sized the grid from uniquetreats
+        # but picked the scalar-vs-array branch from ntreats, so a single
+        # treatment measured in several replicates got a bare Axes and then
+        # raised TypeError: 'Axes' object is not subscriptable.
+        ax = fig.subplots(1,self.uniquetreats.shape[0], squeeze=False)[0]
         maxval = np.nanmax(dataarray)
         minval = min(0,np.nanmin(dataarray))
-        if self.ntreats==1:
-            ax.plot(self.time,dataarray[0], 'o', label='Data', color='blue')
+        for i in range(len(self.uniquetreats)):
+            for j in range(len(dataarray)):
+                if self.treatmentsnames[j] == self.uniquetreats[i]:
+                    ax[i].plot(self.time, dataarray[j], 'o', color='blue')
             if wmeans:
-                ax.errorbar(self.time,self.meanvalstransf, 
-                            yerr=[self.meanvalstransf - self.lowlimtreat,
-                                  self.upplimtreat - self.meanvalstransf],
-                            fmt='s', label='Weighted mean', color='red')
-            ax.set_ylabel("Data")
-            ax.set_xlabel("Time [d]")
-        else:
-            for i in range(len(self.uniquetreats)):
-                for j in range(len(dataarray)):
-                    if self.treatmentsnames[j] == self.uniquetreats[i]:
-                        ax[i].plot(self.time, dataarray[j], 'o', color='blue')
-                if wmeans:
-                    ax[i].errorbar(self.time,self.meanvalstransf[i,:], 
-                                   yerr=[self.meanvalstransf[i,:] - self.lowlimtreat[i,:],
-                                         self.upplimtreat[i,:] - self.meanvalstransf[i,:]],
-                                   fmt='s', label='Weighted mean', color='red')
-                ax[i].set_xlabel("Time [d]")
-                ax[i].set_title("T %s"%self.uniquetreats[i])
-                ax[i].set_ylim([minval, maxval*1.1])
-            ax[0].set_ylabel(label)
-        plt.tight_layout()
-        plt.show()
+                ax[i].errorbar(self.time,self.meanvalstransf[i,:],
+                               yerr=[self.meanvalstransf[i,:] - self.lowlimtreat[i,:],
+                                     self.upplimtreat[i,:] - self.meanvalstransf[i,:]],
+                               fmt='s', label='Weighted mean', color='red')
+            ax[i].set_xlabel("Time [d]")
+            ax[i].set_title("T %s"%self.uniquetreats[i])
+            ax[i].set_ylim([minval, maxval*1.1])
+        ax[0].set_ylabel(label)
+        fig.tight_layout()
+        return fig, ax
 
     def add_plotdata(self, ax, ntreat, label="Data", wmeans=False):
         '''

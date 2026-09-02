@@ -903,12 +903,23 @@ class PyParspace:
         profile : list
             list of np.arrays with parameter likelihood profiling
             length of the list is the number of free parameters
+        batchmode : bool
+            close the figure once it has been saved, instead of leaving it
+            open for the caller. Nothing is displayed either way: showing a
+            figure is the caller's job (plt.show() blocks until the window is
+            dismissed). Under IPython/Jupyter with matplotlib integration the
+            figure appears by itself.
         savefig : bool
-            flag to save the figure
+            flag to save the figure (independent of batchmode)
         figbasename : str
             base name of the figure
         extension : str
             extension of the figure
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            the corner-plot figure (already closed when batchmode is True)
         '''
         npars = self.coll_all.shape[1]-1
         chicrit_joint = 0.5 * self.opts.crit_table[npars-1]
@@ -924,7 +935,7 @@ class PyParspace:
         handles=[]
         labels=[]
         # plot the results
-        plt.figure()
+        fig = plt.figure()
         ax = np.zeros((npars,npars),dtype=object)
         for i in range(npars):
             j=0
@@ -964,16 +975,17 @@ class PyParspace:
 
                 handles, labels = ax[i,j].get_legend_handles_labels()            
                 j+=1
-        plt.figlegend(handles, labels, loc='upper right')
-        plt.tight_layout()
-        if batchmode==False:
-            plt.show()
-            if savefig:
-                plt.savefig(figbasename+extension)
-        else:
-            if savefig:
-                plt.savefig(figbasename+extension)
-            plt.close()
+        fig.legend(handles, labels, loc='upper right')
+        fig.tight_layout()
+        # Saving happens unconditionally of batchmode now. Previously the
+        # non-batch branch called plt.show() first, so with an interactive
+        # backend nothing reached disk until the window was dismissed by
+        # hand. Displaying the figure is left to the caller.
+        if savefig:
+            fig.savefig(figbasename+extension)
+        if batchmode:
+            plt.close(fig)
+        return fig
 
     # Run the paramter space explorer with the given options defined in the 
     # intialization of the class
@@ -983,9 +995,11 @@ class PyParspace:
         Parameters:
         -----------
         batchmode : bool
-            If True, the figure is not shown
+            If True, the figure is closed after being saved rather than left
+            open. The figure is never displayed by this call either way -
+            call plt.show() yourself from a plain script.
         savefig : bool
-            If True, the figure is saved to a file 
+            If True, the figure is saved to a file
             (it works independently from batchmode).
         figbasename : str
             Base name of the figure file.
@@ -1459,8 +1473,10 @@ class PyParspace:
         Arguments
         ---------
         bacthmode : bool
-            flag to run the plotting in batch mode
-            (no plotting shown on screen)
+            flag to run the plotting in batch mode: the figure is closed
+            after being saved rather than left open. Nothing is displayed on
+            screen by this call either way - call plt.show() yourself from a
+            plain script.
         savefig : bool
             flag to save the figure
         figbasename : string
