@@ -563,10 +563,10 @@ class survdataclass(dataclass):
         minval = min(0,np.nanmin(dataarray))
         if wmeans:
             mask = self.uniquetreats==ntreat
-            print("mask: ", mask)
-            print("meanvalstransf: ", self.meanvalstransf[mask])
-            print("lowlimtreat: ", self.lowlimtreat[mask])
-            print("upplimtreat: ", self.upplimtreat[mask])
+            # print("mask: ", mask)
+            # print("meanvalstransf: ", self.meanvalstransf[mask])
+            # print("lowlimtreat: ", self.lowlimtreat[mask])
+            # print("upplimtreat: ", self.upplimtreat[mask])
             ax.errorbar(self.time,self.meanvalstransf[mask].flatten(), 
                             yerr=[self.meanvalstransf[mask].flatten() - self.lowlimtreat[mask].flatten(),
                                   self.upplimtreat[mask].flatten() - self.meanvalstransf[mask].flatten()],
