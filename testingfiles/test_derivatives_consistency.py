@@ -9,6 +9,11 @@
 # identical derivatives for the same physical state, just addressed via
 # their respective argument orders.
 
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 
 import pydebtox2019.models as mm

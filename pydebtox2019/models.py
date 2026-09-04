@@ -718,16 +718,13 @@ class DEBtox2019models:
                                                            plateau_tol=plateau_tol)
         return results
 
-    def worker_ecx(self, pars, parvals, posfree, islog, dataset, Tend, X, endpoints,
+    def worker_ecx(self, pars, dataset, Tend, X, endpoints,
                     conc_bounds, max_expand, xtol, plateau_tol=1e-6):
         """
         Worker function for ECx/LCx CI propagation: rebuilds a dataset-specific
         parameter vector from a free-parameter sample and runs calc_ecx_core.
         """
-        expanded = np.array(parvals, copy=True)
-        expanded[posfree] = pars
-        expanded = np.where(islog, 10 ** expanded, expanded)
-        modelpars = self.build_dataset_parameters(expanded, dataset)
+        modelpars = self.resolve_dataset_parameters(dataset, pars=pars)
         return self.calc_ecx_core(modelpars, Tend, X, endpoints, conc_bounds, max_expand, xtol,
                                    plateau_tol=plateau_tol)
 
@@ -993,7 +990,29 @@ class DEBtox2019models:
 
         return results
 
-    def worker_epx(self, pars, parvals, posfree, islog, dataset, exposure_time, exposure_conc,
+    def resolve_dataset_parameters(self, dataset, pars=None, zero_hb=False):
+        """
+        Expand this model's own parameter vector (self.parvals) to linear
+        scale and collapse it to a dataset-specific DEB parameter vector
+        (see build_dataset_parameters), optionally overriding the free-
+        parameter subset (self.posfree) with a sample `pars` - e.g. a row
+        from parspace.propagationset, in the same fit scale as
+        self.parvals - and/or zeroing the background hazard rate `hb`
+        (see calc_epx's zero_hb). Shared by calc_epx's point-estimate call,
+        worker_epx (CI propagation), and plot_epx_results (CI trajectory
+        band), so the three stay in sync.
+        """
+        expanded = np.array(self.parvals, copy=True)
+        if pars is not None:
+            expanded[self.posfree] = pars
+        expanded = np.where(self.islog, 10 ** expanded, expanded)
+        modelpars = self.build_dataset_parameters(expanded, dataset)
+        if zero_hb:
+            modelpars = modelpars.copy()
+            modelpars[DEB_PAR_ORDER.index("hb")] = 0.0
+        return modelpars
+
+    def worker_epx(self, pars, dataset, exposure_time, exposure_conc,
                    Twin, X, endpoints, Tstep, MF_bounds, max_expand, xtol, prune_win=False,
                    plateau_tol=1e-6, zero_hb=False):
         """
@@ -1008,13 +1027,7 @@ class DEBtox2019models:
         the CI bounds are computed under the same background-mortality
         convention as the central value.
         """
-        expanded = np.array(parvals, copy=True)
-        expanded[posfree] = pars
-        expanded = np.where(islog, 10 ** expanded, expanded)
-        modelpars = self.build_dataset_parameters(expanded, dataset)
-        if zero_hb:
-            modelpars = modelpars.copy()
-            modelpars[DEB_PAR_ORDER.index("hb")] = 0.0
+        modelpars = self.resolve_dataset_parameters(dataset, pars=pars, zero_hb=zero_hb)
         return self.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin, X, endpoints,
                                    Tstep, MF_bounds, max_expand, xtol,
                                    prune_win=prune_win, multicore=False,

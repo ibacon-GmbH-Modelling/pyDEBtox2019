@@ -836,6 +836,8 @@ def calc_ecx(
     conc_bounds=None,
     ci=False,
     parspace=None,
+    ci_n_samples=None,
+    ci_seed=None,
     multicore=True,
     max_expand=60,
     xtol=1e-8,
@@ -879,6 +881,16 @@ def calc_ecx(
         parspace.propagationset (same mechanism as predict_exposure).
     parspace : PyParspace, optional
         Required when ci=True.
+    ci_n_samples : int, optional
+        If given (and ci=True), randomly draw only this many parameter sets
+        from parspace.propagationset (without replacement, see ci_seed)
+        instead of propagating all of them - the knob for controlling CI
+        propagation cost when propagationset is large. Trades CI accuracy
+        for speed (see calc_epx's ci_n_samples for the same caveat). None
+        (default) uses the full propagation set.
+    ci_seed : int, optional
+        Seed for the ci_n_samples subsampling (for reproducibility).
+        Ignored if ci_n_samples is None.
     multicore : bool
         Use multiprocessing for the CI propagation.
     max_expand, xtol
@@ -921,9 +933,7 @@ def calc_ecx(
         clow = max(concmax.max() * 1e-6, 1e-10)
         conc_bounds = (clow, chigh)
 
-    basepars = model.parvals.copy()
-    basepars[model.islog] = 10 ** basepars[model.islog]
-    modelpars = model.build_dataset_parameters(basepars, dataset)
+    modelpars = model.resolve_dataset_parameters(dataset)
 
     core = model.calc_ecx_core(modelpars, Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol,
                                 plateau_tol=plateau_tol)
@@ -935,10 +945,11 @@ def calc_ecx(
         if parspace is None:
             raise ValueError("parspace must be supplied when ci=True")
 
+        propagationset = _subsample_rows(parspace.propagationset, ci_n_samples, ci_seed)
+
         args = [
-            (pars, model.parvals, parspace.posfree, model.islog, dataset,
-             Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol, plateau_tol)
-            for pars in parspace.propagationset
+            (pars, dataset, Tend_arr, X, endpoint_codes, conc_bounds, max_expand, xtol, plateau_tol)
+            for pars in propagationset
         ]
 
         if multicore:
@@ -983,6 +994,8 @@ def calc_dose_response(
     plateau_tol=1e-6,
     ci=False,
     parspace=None,
+    ci_n_samples=None,
+    ci_seed=None,
     multicore=True,
     plot=True,
     verbose=False,
@@ -1039,6 +1052,12 @@ def calc_dose_response(
         mechanism as calc_ecx).
     parspace : PyParspace, optional
         Required when ci=True.
+    ci_n_samples, ci_seed
+        Passed through to calc_ecx: cap CI propagation to a random
+        subsample of parspace.propagationset. Cost here scales with
+        n_points x len(propagationset) (one bisection search per grid
+        point per parameter set), so this is usually the more important
+        knob to use the finer x_values/n_points is.
     multicore : bool
         Use multiprocessing for the CI propagation (passed to calc_ecx).
     plot : bool
@@ -1069,7 +1088,8 @@ def calc_dose_response(
 
     ecx_results = calc_ecx(
         model, Tend_val, X=x_values, endpoints=endpoints, dataset=dataset,
-        conc_bounds=conc_bounds, ci=ci, parspace=parspace, multicore=multicore,
+        conc_bounds=conc_bounds, ci=ci, parspace=parspace,
+        ci_n_samples=ci_n_samples, ci_seed=ci_seed, multicore=multicore,
         max_expand=max_expand, xtol=xtol, plateau_tol=plateau_tol, verbose=verbose,
     )
 
@@ -1147,6 +1167,28 @@ def _resolve_exposure_profile(exposure):
     return np.asarray(exposure_time, dtype=float), np.asarray(exposure_conc, dtype=float)
 
 
+def _subsample_rows(arr, n_samples=None, seed=None):
+    """
+    Randomly draw `n_samples` rows (without replacement) from `arr`, or
+    return `arr` unchanged if n_samples is None or >= len(arr).
+
+    Used to cap the number of parspace.propagationset parameter sets
+    propagated through calc_epx's ci=True path (and plot_epx_results'
+    trajectory band), since that search is by far the most expensive part
+    of EPx/LPx CI propagation. Note this trades CI accuracy for speed:
+    propagationset is a profile-likelihood confidence-region sample (its
+    rows already sit near the edge of that region), not a random posterior
+    draw, so a small random subset can miss the true extremes and make the
+    resulting min/max envelope narrower than the full-set CI.
+    """
+    arr = np.asarray(arr)
+    if n_samples is None or n_samples >= len(arr):
+        return arr
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(arr), size=n_samples, replace=False)
+    return arr[idx]
+
+
 def calc_epx(
     model,
     exposure,
@@ -1162,6 +1204,8 @@ def calc_epx(
     prune_win=False,
     ci=False,
     parspace=None,
+    ci_n_samples=None,
+    ci_seed=None,
     multicore=True,
     verbose=True,
     zero_hb=False,
@@ -1246,6 +1290,19 @@ def calc_epx(
         parspace.propagationset (same mechanism as calc_ecx).
     parspace : PyParspace, optional
         Required when ci=True.
+    ci_n_samples : int, optional
+        If given (and ci=True), randomly draw only this many parameter
+        sets from parspace.propagationset (without replacement, see
+        ci_seed) instead of propagating all of them - the CI propagation
+        reruns the full moving-window search per parameter set, so this is
+        the main knob for controlling its cost. Trades CI accuracy for
+        speed: propagationset is a profile-likelihood confidence-region
+        sample, not a random posterior draw, so a small subsample can miss
+        the true extremes and understate the CI width. None (default)
+        uses the full propagation set.
+    ci_seed : int, optional
+        Seed for the ci_n_samples subsampling (for reproducibility).
+        Ignored if ci_n_samples is None.
     multicore : bool
         Use all physical cores. For the main (point-estimate) calculation
         this parallelizes the per-window bisections themselves (unlike
@@ -1285,8 +1342,15 @@ def calc_epx(
             (window_starts, mf_curve) tuples: the full per-window critical
             multiplication-factor curve, e.g. for plotting with
             plot_epx_results.
-        If ci=True, also results[endpoint_name]['{x}_lo'] / '{x}_up'
-        (CI bounds on the EPx/LPx value only).
+        If ci=True, also:
+        results[endpoint_name]['{x}_lo'] / '{x}_up']
+            CI bounds (min/max across the propagation set) on the
+            EPx/LPx value, aligned with Twin.
+        results[endpoint_name]['{x}_curve_lo'] / '{x}_curve_up']
+            CI bounds on the full per-window mf_curve (same shape/
+            alignment as '{x}_curve', i.e. one array per Twin entry,
+            aligned with that entry's window_starts) - for shading
+            Figure 1 of plot_epx_results.
     """
     exposure_time, exposure_conc = _resolve_exposure_profile(exposure)
     Twin_arr = np.atleast_1d(np.asarray(Twin, dtype=float))
@@ -1302,12 +1366,7 @@ def calc_epx(
             for ep in endpoints
         )
 
-    basepars = model.parvals.copy()
-    basepars[model.islog] = 10 ** basepars[model.islog]
-    modelpars = model.build_dataset_parameters(basepars, dataset)
-    if zero_hb:
-        modelpars = modelpars.copy()
-        modelpars[mm.DEB_PAR_ORDER.index("hb")] = 0.0
+    modelpars = model.resolve_dataset_parameters(dataset, zero_hb=zero_hb)
 
     core = model.calc_epx_core(modelpars, exposure_time, exposure_conc, Twin_arr, X,
                                 endpoint_codes, Tstep, MF_bounds, max_expand, xtol,
@@ -1330,11 +1389,12 @@ def calc_epx(
         if parspace is None:
             raise ValueError("parspace must be supplied when ci=True")
 
+        propagationset = _subsample_rows(parspace.propagationset, ci_n_samples, ci_seed)
+
         args = [
-            (pars, model.parvals, parspace.posfree, model.islog, dataset,
-             exposure_time, exposure_conc, Twin_arr, X, endpoint_codes,
+            (pars, dataset, exposure_time, exposure_conc, Twin_arr, X, endpoint_codes,
              Tstep, MF_bounds, max_expand, xtol, prune_win, plateau_tol, zero_hb)
-            for pars in parspace.propagationset
+            for pars in propagationset
         ]
 
         if multicore:
@@ -1349,6 +1409,20 @@ def calc_epx(
                 stacked = np.vstack([run[ep][x]['value'] for run in allruns])
                 results[name]['%s_lo' % x] = np.nanmin(stacked, axis=0)
                 results[name]['%s_up' % x] = np.nanmax(stacked, axis=0)
+
+                # envelope (min/max across the propagation set) of the full
+                # per-window mf_curve, aligned with '%s_curve' - window_starts
+                # is identical across parameter sets (it only depends on the
+                # exposure profile/Twin/Tstep), so the per-window values can
+                # be stacked directly. Used by plot_epx_results to shade the
+                # MF-vs-window-start curve (Figure 1).
+                curve_lo, curve_up = [], []
+                for iw in range(len(Twin_arr)):
+                    curves = np.vstack([run[ep][x]['mf_curve'][iw] for run in allruns])
+                    curve_lo.append(np.nanmin(curves, axis=0))
+                    curve_up.append(np.nanmax(curves, axis=0))
+                results[name]['%s_curve_lo' % x] = curve_lo
+                results[name]['%s_curve_up' % x] = curve_up
 
     if verbose:
         for ep in endpoint_codes:
@@ -1374,19 +1448,28 @@ def calc_epx(
 
 
 def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_index=0,
-                      n_fine=300, figsize_mf=(7, 5), figsize_window=(11, 5), zero_hb=False):
+                      n_fine=300, figsize_mf=(7, 5), figsize_window=(11, 5), zero_hb=False,
+                      parspace=None, ci_n_samples=None, ci_seed=None):
     """
     Produce the two diagnostic figures for a calc_epx result.
 
     Figure 1 ("MF curve"): the per-window critical multiplication factor
     (MF) as a function of the time-window start along the exposure
     profile, with the worst-case (minimum, i.e. the EPx/LPx value) window
-    marked.
+    marked. If `results` was computed with calc_epx(..., ci=True), the
+    per-window CI envelope ('{x}_curve_lo'/'{x}_curve_up') is shaded
+    behind the curve - the pyDEBtox2019 equivalent of the shaded EPx-along-
+    the-profile band in BYOM's calc_epx plots.
 
     Figure 2 ("worst-case window"): for that worst-case window, the
     EPx/LPx-scaled exposure profile on the left, and the endpoint
     trajectory over the window compared to the unexposed control on the
-    right.
+    right. If `parspace` is given, the multiplication factor is held fixed
+    at the point-estimate EPx/LPx value while the DEB parameters are swept
+    over parspace.propagationset (or a random subsample of it, see
+    ci_n_samples), and the resulting envelope of exposed/control
+    trajectories is shaded - the pyDEBtox2019 equivalent of BYOM's second
+    CI figure (parameter-uncertainty band at fixed MF).
 
     Parameters
     ----------
@@ -1420,6 +1503,24 @@ def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_inde
         with zero_hb - the LPx value (worst_time/epx_value, already taken
         from `results`) is unaffected either way (see calc_epx docstring),
         only the two freshly-recomputed diagnostic curves change here.
+    parspace : PyParspace, optional
+        If given, draws the Figure 2 parameter-uncertainty band: for each
+        free-parameter sample in parspace.propagationset (or a subsample,
+        see ci_n_samples), the worst-case-window trajectory is recomputed
+        with the multiplication factor held fixed at `epx_value`
+        (results[endpoint][x][twin_index], the point estimate), and the
+        envelope (min/max) across samples is shaded around the exposed and
+        control curves.
+    ci_n_samples : int, optional
+        If given (and parspace is not None), randomly draw only this many
+        parameter sets from parspace.propagationset (without replacement,
+        see ci_seed) for the Figure 2 band, instead of using all of them.
+        See calc_epx's ci_n_samples for the same accuracy/speed tradeoff -
+        this loop is cheap per sample (two ODE solves), so it's usually
+        only worth capping when propagationset itself is very large.
+    ci_seed : int, optional
+        Seed for the ci_n_samples subsampling (for reproducibility).
+        Ignored if ci_n_samples is None.
 
     Returns
     -------
@@ -1438,10 +1539,18 @@ def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_inde
 
     # --- Figure 1: per-window critical MF as a function of window start ---
     fig_mf, ax_mf = plt.subplots(figsize=figsize_mf)
+    curve_lo_key, curve_up_key = '%s_curve_lo' % x, '%s_curve_up' % x
+    has_ci_curve = curve_lo_key in results[endpoint]
+    if has_ci_curve:
+        curve_lo = results[endpoint][curve_lo_key][twin_index]
+        curve_up = results[endpoint][curve_up_key][twin_index]
+        ax_mf.fill_between(window_starts, curve_lo, curve_up, color='tab:blue', alpha=0.2,
+                            label='parameter CI')
     ax_mf.plot(window_starts, mf_curve, '-', color='tab:blue')
     if np.isfinite(worst_time):
         ax_mf.plot(worst_time, epx_value, 'o', color='tab:red',
                    label='worst case (%s%s = %.4g)' % (label, x, epx_value))
+    if has_ci_curve or np.isfinite(worst_time):
         ax_mf.legend()
     ax_mf.set_yscale('log')
     ax_mf.set_xlabel('Window start time')
@@ -1458,12 +1567,7 @@ def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_inde
         fig_window.tight_layout()
         return fig_mf, fig_window
 
-    basepars = model.parvals.copy()
-    basepars[model.islog] = 10 ** basepars[model.islog]
-    modelpars = model.build_dataset_parameters(basepars, dataset)
-    if zero_hb:
-        modelpars = modelpars.copy()
-        modelpars[mm.DEB_PAR_ORDER.index("hb")] = 0.0
+    modelpars = model.resolve_dataset_parameters(dataset, zero_hb=zero_hb)
 
     t_list, c_list = model._window_profile(exposure_time, exposure_conc, worst_time, tw)
 
@@ -1478,6 +1582,27 @@ def plot_epx_results(model, exposure, results, endpoint, x, dataset=0, twin_inde
                                   timeext=t_fine)
     sol_control = model.calc_model(np.zeros(2), np.array([0.0, tw]), modelpars, model.moa,
                                     model.feedb, timeext=t_fine)
+
+    if parspace is not None:
+        propagationset = _subsample_rows(parspace.propagationset, ci_n_samples, ci_seed)
+        worst_samples, control_samples = [], []
+        control_time = np.array([0.0, tw])
+        for pars in propagationset:
+            modelpars_s = model.resolve_dataset_parameters(dataset, pars=pars, zero_hb=zero_hb)
+            sol_worst_s = model.calc_model(epx_value * c_list, t_list, modelpars_s, model.moa,
+                                            model.feedb, timeext=t_fine)
+            sol_control_s = model.calc_model(np.zeros(2), control_time, modelpars_s, model.moa,
+                                              model.feedb, timeext=t_fine)
+            worst_samples.append(sol_worst_s[si])
+            control_samples.append(sol_control_s[si])
+        worst_samples = np.vstack(worst_samples)
+        control_samples = np.vstack(control_samples)
+        ax_right.fill_between(t_fine, np.nanmin(worst_samples, axis=0),
+                               np.nanmax(worst_samples, axis=0), color='tab:blue', alpha=0.2,
+                               label='Exposed CI (parameter uncertainty)')
+        ax_right.fill_between(t_fine, np.nanmin(control_samples, axis=0),
+                               np.nanmax(control_samples, axis=0), color='tab:gray', alpha=0.2,
+                               label='Control CI (parameter uncertainty)')
 
     ax_right.plot(t_fine, sol_worst[si], color='tab:blue', label='Exposed (x %s%s)' % (label, x))
     ax_right.plot(t_fine, sol_control[si], '--', color='tab:gray', label='Control')

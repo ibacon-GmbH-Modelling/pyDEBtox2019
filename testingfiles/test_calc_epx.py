@@ -1,5 +1,10 @@
 # testing script for calc_epx with a realistic, high-resolution exposure profile
 
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 import time
 import numpy as np

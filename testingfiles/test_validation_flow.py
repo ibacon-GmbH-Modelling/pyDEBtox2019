@@ -6,6 +6,11 @@
 # around the point estimate - the same shortcut used for the CI smoke test
 # in test_calc_ecx.py (see around its call to ps.PyParspace there).
 
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import matplotlib
 #matplotlib.use("Agg")  # keep this script runnable headless / non-interactively
 

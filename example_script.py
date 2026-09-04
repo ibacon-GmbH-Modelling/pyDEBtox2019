@@ -1,7 +1,8 @@
 # Example script to run a complete analysis of a DEBtox2019 model with the pyDEBtox2019 package.
 # The example data is taken from the original DEBtox2019 model coded in Matlab by Dr. Tjalling Jager.
 #
-# This script shows the use of the tool to fit a DEBtox2019 model to data, calculate ECx and EPx values, and validate the model.
+# This script shows the use of the tool to fit a DEBtox2019 model to data, calculate ECx/EPx values
+# (including their confidence intervals) and dose-response curves, and validate the model.
 # The calibration of the model is preformed on a single dataset, but the code allows the use of multiple datasets.
 # Additional example files are in the testingfiles folder
 
@@ -18,11 +19,14 @@ import pydebtox2019.readin as readin
 
 if __name__ == "__main__":
 
-    # decide which steps to run. 
+    # decide which steps to run.
     # If loadresults=1, the example runs are loaded and the fitting is not done.
     loadresults = 1 # load example runs
     runecx = 1      # run the ECx calculation
+    rundoseresponse = 1  # run the ECx-based dose-response curve
     runepx = 1      # run the EPx calculation
+    runepx_ci = 1   # also propagate the EPx/LPx confidence interval (slower -
+                    # see ci_n_samples below for keeping this laptop-friendly)
     validate = 1    # run the validation step
 
     # define a few path to files for easiness of reading
@@ -180,6 +184,31 @@ if __name__ == "__main__":
                                multicore=True,
                                verbose=True,)
 
+    if rundoseresponse:
+        # dose-response curve at a fixed exposure duration, built directly on
+        # top of calc_ecx: instead of a handful of named X values (as above),
+        # it scans a fine effect-level grid and reframes each (x, ECx) pair as
+        # a point on the classical concentration-vs-response sigmoid curve -
+        # one subplot per endpoint, with a shaded CI band on the concentration
+        # axis (same parspace.propagationset mechanism as calc_ecx above).
+        #
+        # Cost here scales with n_points x len(propagationset) (one bisection
+        # search per grid point per parameter set) - parspace_tox's real
+        # propagation set has thousands of rows, so ci_n_samples caps how
+        # many are actually used (same subsampling knob as calc_epx above).
+        dose_response = dt2019.calc_dose_response(
+            parspace_tox.model,
+            Tend=21,
+            dataset=0,
+            n_points=21,
+            ci=True,
+            parspace=parspace_tox,
+            ci_n_samples=15,
+            ci_seed=0,
+            multicore=True,
+            verbose=False,
+        )
+
     if runepx:
         # calculate EPx values
         # load a profile
@@ -195,7 +224,15 @@ if __name__ == "__main__":
         # prune_win=True skips window positions that provably cannot be the
         # worst case (pyDEBtox2019 equivalent of prune_windows.m) before running
         # any bisection on them - safe here since feedbs are all off.
-        # Keep the ci to false if you are running it on a normal laptop
+        #
+        # ci=True propagates the confidence interval through the full
+        # moving-window search for every parameter set in
+        # parspace_tox.propagationset - by far the most expensive part of
+        # EPx/LPx CI propagation, since it reruns that whole search per
+        # parameter set. ci_n_samples caps how many of those parameter sets
+        # are actually used (randomly subsampled, ci_seed for
+        # reproducibility) - the knob to turn if this gets too slow on a
+        # normal laptop; set runepx_ci=False above to skip CI entirely.
         res = dt2019.calc_epx(
             parspace_tox.model,
             epcl,
@@ -205,17 +242,27 @@ if __name__ == "__main__":
             Tstep=1.0,
             prune_win=True,
             verbose=True,
-            ci=False,
+            ci=runepx_ci,
+            parspace=parspace_tox if runepx_ci else None,
+            ci_n_samples=10,
+            ci_seed=0,
+            multicore=True,
             zero_hb=True)
 
         for ep in ('survival', 'length', 'reproduction'):
-            # cycle true the endpoints and plot the results of the EPx calculation
+            # cycle true the endpoints and plot the results of the EPx
+            # calculation. Passing parspace here (again subsampled the same
+            # way) additionally shades Figure 2's exposed/control trajectory
+            # band - the parameter-uncertainty CI at the fixed worst-case MF.
             dt2019.plot_epx_results(model=parspace_tox.model,
                                     exposure=epcl,
                                     results=res,
                                     endpoint=ep,
                                     x=50,
-                                    zero_hb=True)
+                                    zero_hb=True,
+                                    parspace=parspace_tox if runepx_ci else None,
+                                    ci_n_samples=10,
+                                    ci_seed=0)
     
     if validate:
         with open(parameterpath+'input_pars_tbp3.json') as json_file:

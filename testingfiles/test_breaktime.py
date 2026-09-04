@@ -18,6 +18,11 @@
 # rows in Test_Cdata.txt, encoding an instantaneous concentration step)
 # must not raise - that's the second bug fixed alongside B3.
 
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 
 import numpy as np
