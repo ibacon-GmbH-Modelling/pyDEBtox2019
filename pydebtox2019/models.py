@@ -66,7 +66,10 @@ def _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb):
 
     hazard = min(hazard, 111.) # avoid stiffness
     sMOA = moa * stress
-    sMOA[0] = min(sMOA[0],1)
+    # need to avoid sA=1 as it will produce numerical issues
+    # with a 0 denominator later in the code
+    EPS = 1e-12
+    sMOA[0] = min(sMOA[0],1-EPS)
     sA,sM,sG,sR,sH = sMOA
     dydt[1] = rB * ((1+sM)/(1+sG)) * (f*Lm*((1-sA)/(1+sM)) - L)  # ODE for body length
     # introduce starvation rules
@@ -140,8 +143,12 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
         raise DEBSolverError("calc_DEBresults received non-finite DEBpars or y0")
     if solver=="RK45":
         # solve_ivp has the possibility to choose a different algorithm (default is RK45)
-        sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
+        try:
+            sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
                     args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9)#, dense_output=True)
+        except:
+            print("sol failed")
+            print(C, timextr, y0, DEBpars, moa, feedb,timeext)
         # solve_ivp does NOT raise on a failed integration: on failure it
         # just sets sol.success=False and often returns a truncated sol.y
         # (fewer columns than len(timeext)). Detect that explicitly here
@@ -155,7 +162,16 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
         return(sol.y)
     elif solver=="LSODA":
     # odeint uses LSODA algorithm
+#        try:
         sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb), rtol=1e-9, atol=1e-9)
+ #       except:
+            # print("sol failed")
+            # # sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
+            # #         args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9)
+            # import matplotlib.pyplot as plt
+            # plt.figure()
+            # plt.plot(timextr,C)
+            # print(C, timextr, y0, DEBpars, moa, feedb,timeext)
         # odeint also does not raise on a failed integration: it prints an
         # ODEPACK warning to stderr and still returns an array of the
         # expected shape, just filled with non-finite/garbage values past
@@ -831,8 +847,11 @@ class DEBtox2019models:
             # see the NOTE in calc_ecx_core.response: a bare 2-point timeext
             # can silently corrupt LSODA results for stiff/high-concentration
             # windows, since odeint's mxstep budget applies per interval.
+            # try:
             sol = self.calc_model(MF * c_list, t_list, modelpars, self.moa, self.feedb,
                                    timeext=np.linspace(0.0, tw, 50))
+            # except:
+                # print(f"ODE solver failed for window starting at {ts} with MF={MF}. Returning NaN.")
             effect = 1.0 - sol[si, -1] / control_val
             return effect - target
 
