@@ -225,6 +225,95 @@ def scaled_loglikelihood(model,lengths,weights,transf):
     return(llk)
 
 
+@jit(nopython=True, cache=True)
+def _window_profile_core(exposure_time, exposure_conc, t_start, Twin):
+    # see DEBtox2019models._window_profile for the full docstring/behavior
+    # description - this is the same logic, rewritten to fill a
+    # preallocated output array by index instead of growing Python lists
+    # (the list-growth version isn't an idiomatic/fast numba pattern).
+    prof_start = exposure_time[0]
+    prof_end = exposure_time[-1]
+    t_end = t_start + Twin
+
+    if t_end <= prof_start or t_start >= prof_end:
+        return np.array([0.0, Twin]), np.array([0.0, 0.0])
+
+    lo = max(t_start, prof_start)
+    hi = min(t_end, prof_end)
+    mask = (exposure_time > lo) & (exposure_time < hi)
+    inner_t = exposure_time[mask] - t_start
+    inner_c = exposure_conc[mask]
+    n_inner = inner_t.shape[0]
+
+    head_case = t_start < prof_start
+    tail_case = t_end > prof_end
+    n_head = 2 if head_case else 0
+    n_tail = 3 if tail_case else 1
+    n_total = 1 + n_head + n_inner + n_tail
+
+    t_list = np.empty(n_total)
+    c_list = np.empty(n_total)
+
+    idx = 0
+    t_list[idx] = 0.0
+    if head_case:
+        # exposure is zero until the profile actually starts, then steps
+        # up to the profile's own initial value
+        head = prof_start - t_start
+        c_list[idx] = 0.0
+        idx += 1
+        t_list[idx] = head
+        c_list[idx] = 0.0
+        idx += 1
+        t_list[idx] = head
+        c_list[idx] = exposure_conc[0]
+        idx += 1
+    else:
+        c_list[idx] = np.interp(t_start, exposure_time, exposure_conc)
+        idx += 1
+
+    t_list[idx:idx + n_inner] = inner_t
+    c_list[idx:idx + n_inner] = inner_c
+    idx += n_inner
+
+    if tail_case:
+        # exposure holds its last known value up to the profile's end,
+        # then steps down to zero for the remainder of the window
+        tail = prof_end - t_start
+        t_list[idx] = tail
+        c_list[idx] = exposure_conc[-1]
+        idx += 1
+        t_list[idx] = tail
+        c_list[idx] = 0.0
+        idx += 1
+        t_list[idx] = Twin
+        c_list[idx] = 0.0
+        idx += 1
+    else:
+        t_list[idx] = Twin
+        c_list[idx] = np.interp(t_end, exposure_time, exposure_conc)
+        idx += 1
+
+    return t_list, c_list
+
+
+@jit(nopython=True, cache=True)
+def _prune_windows_mask_core(exposure_time, exposure_conc, window_starts, Twin):
+    # see DEBtox2019models._prune_windows_mask for the full docstring -
+    # same logic, calling _window_profile_core directly (nopython calling
+    # nopython) instead of dispatching through the Python-level staticmethod
+    # once per window.
+    n = window_starts.shape[0]
+    mins = np.empty(n)
+    maxs = np.empty(n)
+    for i in range(n):
+        _, c_list = _window_profile_core(exposure_time, exposure_conc, window_starts[i], Twin)
+        mins[i] = c_list.min()
+        maxs[i] = c_list.max()
+    maxmin = mins.max()
+    return maxs >= maxmin
+
+
 class DEBtox2019models:
     '''
     Container for one DEBtox2019 physiological + toxicokinetic-toxicodynamic
@@ -768,46 +857,13 @@ class DEBtox2019models:
         represented as a two-point step (flat zero, then an instantaneous
         jump to/from the profile's actual first/last value), rather than a
         gradual ramp.
+
+        Thin wrapper around the numba-jitted _window_profile_core (module
+        level), kept so existing self._window_profile(...) /
+        DEBtox2019models._window_profile(...) call sites don't need to
+        change.
         """
-        prof_start = exposure_time[0]
-        prof_end = exposure_time[-1]
-        t_end = t_start + Twin
-
-        if t_end <= prof_start or t_start >= prof_end:
-            # window entirely outside the profile's time range: no exposure at all
-            return np.array([0.0, Twin]), np.array([0.0, 0.0])
-
-        lo = max(t_start, prof_start)
-        hi = min(t_end, prof_end)
-        mask = (exposure_time > lo) & (exposure_time < hi)
-        inner_t = (exposure_time[mask] - t_start).tolist()
-        inner_c = exposure_conc[mask].tolist()
-
-        t_list = [0.0]
-        c_list = [0.0]
-        if t_start < prof_start:
-            # exposure is zero until the profile actually starts, then
-            # steps up to the profile's own initial value
-            head = prof_start - t_start
-            t_list += [head, head]
-            c_list += [0.0, exposure_conc[0]]
-        else:
-            c_list[0] = np.interp(t_start, exposure_time, exposure_conc)
-
-        t_list += inner_t
-        c_list += inner_c
-
-        if t_end > prof_end:
-            # exposure holds its last known value up to the profile's end,
-            # then steps down to zero for the remainder of the window
-            tail = prof_end - t_start
-            t_list += [tail, tail, Twin]
-            c_list += [exposure_conc[-1], 0.0, 0.0]
-        else:
-            t_list.append(Twin)
-            c_list.append(np.interp(t_end, exposure_time, exposure_conc))
-
-        return np.asarray(t_list), np.asarray(c_list)
+        return _window_profile_core(exposure_time, exposure_conc, t_start, Twin)
 
     @staticmethod
     def _prune_windows_mask(exposure_time, exposure_conc, window_starts, Twin):
@@ -830,15 +886,11 @@ class DEBtox2019models:
 
         Returns a boolean array (True = keep, False = pruned), aligned
         with `window_starts`.
+
+        Thin wrapper around the numba-jitted _prune_windows_mask_core
+        (module level), kept for the same reason as _window_profile above.
         """
-        mins = np.empty(window_starts.shape)
-        maxs = np.empty(window_starts.shape)
-        for i, ts in enumerate(window_starts):
-            _, c_list = DEBtox2019models._window_profile(exposure_time, exposure_conc, ts, Twin)
-            mins[i] = c_list.min()
-            maxs[i] = c_list.max()
-        maxmin = mins.max()
-        return maxs >= maxmin
+        return _prune_windows_mask_core(exposure_time, exposure_conc, window_starts, Twin)
 
     def _epx_window_task(self, exposure_time, exposure_conc, ts, tw, si, control_val, target,
                           modelpars, mflow0, mfhigh0, max_expand, xtol, plateau_tol=1e-6):
