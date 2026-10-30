@@ -873,9 +873,11 @@ def calc_ecx(
         Dataset whose parameterization is used to run the model
         (see model.build_dataset_parameters).
     conc_bounds : tuple(float, float), optional
-        Initial (low, high) concentration bracket for the bisection search;
-        automatically expanded if it does not bracket the root. Defaults to
-        a bracket derived from the dataset's observed concentrations.
+        Hard (low, high) bound on the accepted ECx/LCx concentration: the
+        search may probe beyond it to numerically locate the root, but
+        returns NaN (rather than an out-of-range concentration) if the
+        root itself falls outside conc_bounds. Defaults to a bracket
+        derived from the dataset's observed concentrations.
     ci : bool
         If True, also propagate the 95% CI on the ECx/LCx estimates using
         parspace.propagationset (same mechanism as predict_exposure).
@@ -1262,8 +1264,11 @@ def calc_epx(
         part probes the profile's tail-off); both ends are zero-padded
         where the window falls outside the recorded profile.
     MF_bounds : tuple(float, float), optional
-        Initial (low, high) bracket for the multiplication-factor search;
-        automatically expanded if it does not bracket the root.
+        Hard (low, high) bound on the accepted critical multiplication
+        factor for each window: the search may probe beyond it to
+        numerically locate the root, but a window's mf_curve entry (and
+        hence its contribution to the overall EPx/LPx minimum) is NaN if
+        the root itself falls outside MF_bounds.
     max_expand, xtol
         Passed to the bisection search (see DEBtox2019models.calc_epx_core).
     plateau_tol : float or None

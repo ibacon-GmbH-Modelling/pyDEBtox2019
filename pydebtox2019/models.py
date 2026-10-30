@@ -609,9 +609,20 @@ class DEBtox2019models:
                      plateau_tol=1e-6):
         """
         Find the value (returned in linear scale) at which `f` (a function
-        of log10(value)) crosses zero, expanding the (low, high) bracket
-        geometrically (in log space) until a sign change is found or
-        `max_expand` expansions have been tried.
+        of log10(value)) crosses zero, within the (low, high) bracket.
+
+        (low, high) is a hard bound on the *accepted answer*: if the root
+        does not lie within it, this returns NaN. Internally, the search
+        bracket is still allowed to expand geometrically (in log space)
+        beyond (low, high) - one decade per step, up to `max_expand` steps
+        - purely to *locate* a sign change; but the final root is only
+        returned if it actually falls back within the original (low, high)
+        once found. This matters because brentq needs a bracket that
+        straddles the root, which (low, high) itself may not do even when
+        the true root is well inside it (e.g. if both endpoints happen to
+        lie on the same side) - so some expansion-then-contraction is
+        needed to locate the root at all, without it meaning any root found
+        outside (low, high) should be accepted as a valid answer.
 
         `increasing` indicates the expected sign of df/d(value): False for
         a decreasing f (e.g. response falling with concentration, as in
@@ -633,9 +644,11 @@ class DEBtox2019models:
         response has plateaued and stops early, returning NaN. Set to None
         to disable this check and always use the full `max_expand` budget.
 
-        Returns np.nan if no bracket could be found or the search fails.
+        Returns np.nan if no bracket could be found, the search fails, or
+        the root found lies outside the original (low, high).
         """
         loglow, loghigh = np.log10(low), np.log10(high)
+        orig_loglow, orig_loghigh = loglow, loghigh
         flow, fhigh = f(loglow), f(loghigh)
         if abs(flow) < 1e-12:
             return 10 ** loglow
@@ -661,6 +674,8 @@ class DEBtox2019models:
             root = brentq(f, loglow, loghigh, xtol=xtol)
         except (ValueError, RuntimeError):
             return np.nan
+        if root < orig_loglow or root > orig_loghigh:
+            return np.nan
         return 10 ** root
 
     def calc_ecx_core(self, modelpars, Tend, X=(10, 50), endpoints=(0, 1, 2),
@@ -685,8 +700,10 @@ class DEBtox2019models:
         - Tend: array-like of evaluation times.
         - X: iterable of effect levels in percent (0 <= x < 100).
         - endpoints: iterable of endpoint codes (0=survival, 1=length, 2=reproduction).
-        - conc_bounds: initial (low, high) concentration bracket for the
-          bisection search; automatically expanded if needed.
+        - conc_bounds: hard (low, high) bound on the accepted ECx/LCx
+          answer (see _bisect_log) - the search may probe beyond it to
+          locate the root, but returns NaN if the root itself falls
+          outside conc_bounds.
         - max_expand, xtol: passed to the bracket search / brentq.
         - plateau_tol: passed to the bracket search (see _bisect_log);
           stops expanding early (returning NaN) once the response has
@@ -904,8 +921,10 @@ class DEBtox2019models:
         - endpoints: iterable of endpoint codes (0=survival, 1=length, 2=reproduction).
         - Tstep: step by which the window start is advanced across the
           (head-to-tail extended) profile range.
-        - MF_bounds: initial (low, high) bracket for the multiplication
-          factor search; automatically expanded if needed.
+        - MF_bounds: hard (low, high) bound on the accepted critical-MF
+          answer for each window (see _bisect_log) - the search may probe
+          beyond it to locate the root, but a window's mf_curve entry is
+          NaN if the root itself falls outside MF_bounds.
         - max_expand, xtol: passed to the bracket search / brentq.
         - prune_win: if True, skip windows that provably cannot be the
           worst case before running any bisection on them (see
