@@ -124,8 +124,7 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
     return _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb)
 
 
-
-def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
+def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45'):
     # L0 = DEBpars[5]
     # y0 = np.array([0., L0*1.0, 0., 1.])
     # TODO: test if we need a very extended time vector or it will be enough to use the union of
@@ -141,14 +140,11 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
     # (occasionally non-terminating) solver to fail on its own.
     if (not np.all(np.isfinite(DEBpars))) or (not np.all(np.isfinite(y0))):
         raise DEBSolverError("calc_DEBresults received non-finite DEBpars or y0")
+
     if solver=="RK45":
         # solve_ivp has the possibility to choose a different algorithm (default is RK45)
-        try:
-            sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
-                    args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9)#, dense_output=True)
-        except:
-            print("sol failed")
-            print(C, timextr, y0, DEBpars, moa, feedb,timeext)
+        sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
+                args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9)#, dense_output=True)
         # solve_ivp does NOT raise on a failed integration: on failure it
         # just sets sol.success=False and often returns a truncated sol.y
         # (fewer columns than len(timeext)). Detect that explicitly here
@@ -159,19 +155,10 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
                 "solve_ivp failed to integrate the DEB model over the requested "
                 "time grid (message: %s)" % sol.message
             )
-        return(sol.y)
+        return sol.y
     elif solver=="LSODA":
-    # odeint uses LSODA algorithm
-#        try:
+        # odeint uses LSODA algorithm
         sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb), rtol=1e-9, atol=1e-9)
- #       except:
-            # print("sol failed")
-            # # sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
-            # #         args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9)
-            # import matplotlib.pyplot as plt
-            # plt.figure()
-            # plt.plot(timextr,C)
-            # print(C, timextr, y0, DEBpars, moa, feedb,timeext)
         # odeint also does not raise on a failed integration: it prints an
         # ODEPACK warning to stderr and still returns an array of the
         # expected shape, just filled with non-finite/garbage values past
@@ -181,7 +168,7 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb,timeext,solver='RK45'):
                 "odeint failed to integrate the DEB model over the requested "
                 "time grid (non-finite or malformed result)"
             )
-        return(sol.T)
+        return sol.T
     else:
         raise ValueError("Solver not recognized. Use 'RK45' or 'LSODA'.")
 
@@ -716,19 +703,10 @@ class DEBtox2019models:
         Tend_arr = np.atleast_1d(np.asarray(Tend, dtype=float))
         clow0, chigh0 = conc_bounds
 
-        def response(C, t):
+        def response(C, tprofile, timeext_dense):
             Cprofile = np.array([C, C])
-            tprofile = np.array([0.0, t])
-            # NOTE: timeext must NOT be a bare 2-point [0, t] array here. With
-            # solver='LSODA' (odeint/LSODA), the mxstep budget (default 500)
-            # applies PER INTERVAL between consecutive requested time points,
-            # not to the whole integration. A 2-point request forces the
-            # entire (potentially stiff, high-concentration) integration into
-            # a single 500-step budget; if exceeded, odeint silently returns
-            # a corrupted result with only a non-fatal warning. A denser grid
-            # gives each sub-interval its own step budget and avoids this.
             sol = self.calc_model(Cprofile, tprofile, modelpars, self.moa, self.feedb,
-                                   timeext=np.linspace(0.0, t, 50))
+                                   timeext=timeext_dense)
             return sol[:, -1]
 
         results = {ep: {x: np.full(Tend_arr.shape, np.nan) for x in X} for ep in endpoints}
@@ -736,15 +714,31 @@ class DEBtox2019models:
         for it, t in enumerate(Tend_arr):
             if t <= 0:
                 continue
-            control = response(0.0, t)
+            # tprofile/timeext_dense depend only on t, not on the
+            # concentration being tried - build them once per t instead of
+            # on every response() call (each bisection search below calls
+            # response() many times at this same t).
+            #
+            # NOTE: timeext_dense must NOT be a bare 2-point [0, t] array
+            # here. With solver='LSODA' (odeint/LSODA), the mxstep budget
+            # (default 500) applies PER INTERVAL between consecutive
+            # requested time points, not to the whole integration. A
+            # 2-point request forces the entire (potentially stiff,
+            # high-concentration) integration into a single 500-step
+            # budget; if exceeded, odeint silently returns a corrupted
+            # result with only a non-fatal warning. A denser grid gives
+            # each sub-interval its own step budget and avoids this.
+            tprofile = np.array([0.0, t])
+            timeext_dense = np.linspace(0.0, t, 50)
+            control = response(0.0, tprofile, timeext_dense)
             for ep in endpoints:
                 si = self.ENDPOINT_STATE_IDX[ep]
                 target_base = control[si]
                 for x in X:
                     target = target_base * (1.0 - x / 100.0)
 
-                    def f(logC, si=si, target=target, t=t):
-                        return response(10 ** logC, t)[si] - target
+                    def f(logC, si=si, target=target, tprofile=tprofile, timeext_dense=timeext_dense):
+                        return response(10 ** logC, tprofile, timeext_dense)[si] - target
 
                     results[ep][x][it] = self._bisect_log(f, clow0, chigh0, max_expand, xtol,
                                                            increasing=False,
@@ -858,17 +852,21 @@ class DEBtox2019models:
         cannot parallelize across windows, this can be run independently
         on any core).
         """
+        # t_list/c_list and the dense timeext grid depend only on
+        # (ts, tw)/tw, not on the multiplication factor being tried -
+        # build them once instead of on every f(logMF) call (the bisection
+        # search below calls f() many times for this one window).
+        #
+        # see the NOTE in calc_ecx_core.response: a bare 2-point timeext
+        # can silently corrupt LSODA results for stiff/high-concentration
+        # windows, since odeint's mxstep budget applies per interval.
+        t_list, c_list = self._window_profile(exposure_time, exposure_conc, ts, tw)
+        timeext_dense = np.linspace(0.0, tw, 50)
+
         def f(logMF):
             MF = 10 ** logMF
-            t_list, c_list = self._window_profile(exposure_time, exposure_conc, ts, tw)
-            # see the NOTE in calc_ecx_core.response: a bare 2-point timeext
-            # can silently corrupt LSODA results for stiff/high-concentration
-            # windows, since odeint's mxstep budget applies per interval.
-            # try:
             sol = self.calc_model(MF * c_list, t_list, modelpars, self.moa, self.feedb,
-                                   timeext=np.linspace(0.0, tw, 50))
-            # except:
-                # print(f"ODE solver failed for window starting at {ts} with MF={MF}. Returning NaN.")
+                                   timeext=timeext_dense)
             effect = 1.0 - sol[si, -1] / control_val
             return effect - target
 
