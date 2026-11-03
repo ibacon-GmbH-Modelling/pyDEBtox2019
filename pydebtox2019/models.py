@@ -124,7 +124,8 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
     return _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb)
 
 
-def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45'):
+def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
+                     min_t=500, max_step=None, first_step=None):
     # L0 = DEBpars[5]
     # y0 = np.array([0., L0*1.0, 0., 1.])
     # TODO: test if we need a very extended time vector or it will be enough to use the union of
@@ -141,10 +142,34 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45')
     if (not np.all(np.isfinite(DEBpars))) or (not np.all(np.isfinite(y0))):
         raise DEBSolverError("calc_DEBresults received non-finite DEBpars or y0")
 
+    # max_step/first_step: an unconstrained adaptive solver can silently
+    # step clean over a concentration feature narrower than its chosen
+    # step size - t_eval/timeext only requests *output* points, it does
+    # not constrain internal stepping. This is the default, robust
+    # behavior (not an opt-in): unless a caller passes an explicit numeric
+    # max_step, it's always computed from this call's own exposure
+    # profile resolution (timextr) and window span, floored by min_t
+    # (ports BYOM call_deri.m's equivalent protection and its own
+    # literal default; DEBtox2019models.calc_model passes the model's own
+    # - user-settable - self.min_t through here, and explicitly opts out
+    # with max_step=np.inf for its breaktime=True segments, where no
+    # protection is needed since each segment already spans only one
+    # profile interval).
+    if max_step is None:
+        span = timeext[-1] - timeext[0]
+        if span > 0:
+            min_t_eff = max(min_t, 2 * len(timextr))
+            max_step = span / min_t_eff
+        else:
+            max_step = np.inf
+    if first_step is None and np.isfinite(max_step):
+        first_step = max_step / 10.0
+
     if solver=="RK45":
         # solve_ivp has the possibility to choose a different algorithm (default is RK45)
         sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
-                args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9)#, dense_output=True)
+                args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9,
+                max_step=max_step, first_step=first_step)#, dense_output=True)
         # solve_ivp does NOT raise on a failed integration: on failure it
         # just sets sol.success=False and often returns a truncated sol.y
         # (fewer columns than len(timeext)). Detect that explicitly here
@@ -157,8 +182,13 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45')
             )
         return sol.y
     elif solver=="LSODA":
-        # odeint uses LSODA algorithm
-        sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb), rtol=1e-9, atol=1e-9)
+        # odeint uses LSODA algorithm. hmax/h0 are its max-step/first-step
+        # equivalents; 0 is odeint's own sentinel for "unconstrained"/"let
+        # the solver choose", matching max_step=inf/first_step=None.
+        hmax = 0. if not np.isfinite(max_step) else max_step
+        h0 = 0. if first_step is None else first_step
+        sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb),
+                     rtol=1e-9, atol=1e-9, hmax=hmax, h0=h0)
         # odeint also does not raise on a failed integration: it prints an
         # ODEPACK warning to stderr and still returns an array of the
         # expected shape, just filled with non-finite/garbage values past
@@ -603,9 +633,12 @@ class DEBtox2019models:
             apply_delay = False  # nothing to delay after all
 
         # Simplest case: no segmented (breaktime) solve and no delay to
-        # apply - solve once, directly on the requested grid.
+        # apply - solve once, directly on the requested grid. min_t is
+        # passed through so calc_DEBresults' step-size protection (see
+        # there) uses this model's own setting.
         if not self.breaktime and not apply_delay:
-            return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver=self.solver)
+            return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver=self.solver,
+                                    min_t=self.min_t)
 
         # Merge the original time grid with the concentration-step times
         # (needed to align breaktime segments to C's own time points) and,
@@ -626,13 +659,19 @@ class DEBtox2019models:
                 shifted_tvec = newtime[(newtime <= timextr[t+1]) & (newtime >= timextr[t])] - timextr[t]
                 # print("Segment ", t, " with shifted time vector: ", shifted_tvec)
                 # print("Concentration segment: ", C[t:t+1])
-                modelsl = calc_DEBresults(C[t:t+2], timextr[t:t+2]-timextr[t], y0, DEBpars, moa, feedb, shifted_tvec, solver=self.solver)
+                # max_step=np.inf: explicit opt-out of calc_DEBresults' own
+                # protective default - not needed here, since each segment
+                # already spans only one profile interval by construction
+                # (that's the whole point of breaktime segmenting).
+                modelsl = calc_DEBresults(C[t:t+2], timextr[t:t+2]-timextr[t], y0, DEBpars, moa, feedb, shifted_tvec,
+                                           solver=self.solver, max_step=np.inf)
                 # print("Model solution for segment ", t, ": ", modelsl)
                 y0 = modelsl[:, -1]  # update initial condition for next segment
                 modelsol_union[:, (newtime >= timextr[t]) & (newtime <= timextr[t+1])] = modelsl
         else:
             # Solve once on the union grid
-            modelsol_union = calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, newtime, solver=self.solver)
+            modelsol_union = calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, newtime, solver=self.solver,
+                                              min_t=self.min_t)
             # modelsol_union: shape (n_states, len(newtime))
 
         # We will rebuild the final solution strictly on the original timeext grid
