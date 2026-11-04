@@ -1,6 +1,11 @@
+import warnings
 import numpy as np
 from numba import jit
 from scipy.integrate import odeint,solve_ivp
+try:
+    from scipy.integrate import ODEintWarning
+except ImportError:  # some scipy versions only expose it here
+    from scipy.integrate._odepack_py import ODEintWarning
 from scipy.optimize import brentq
 import multiprocessing as mp
 import psutil
@@ -187,12 +192,47 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
         # the solver choose", matching max_step=inf/first_step=None.
         hmax = 0. if not np.isfinite(max_step) else max_step
         h0 = 0. if first_step is None else first_step
-        sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb),
-                     rtol=1e-9, atol=1e-9, hmax=hmax, h0=h0)
+
+        # mxstep: LSODA's internal step budget applies PER REQUESTED OUTPUT
+        # INTERVAL (between consecutive timeext entries), not to the whole
+        # integration - and defaults to 500 if left unset (mxstep=0). When
+        # hmax forces a small step (above), covering the same interval
+        # needs proportionally more steps, which can exceed that default
+        # budget - LSODA then gives up early, emitting ODEintWarning
+        # ("Excess work done...") WITHOUT raising, and returns a result
+        # that is fully finite (so the isfinite check below does not catch
+        # it) but silently wrong past the point it gave up. Scale mxstep to
+        # the step budget our own hmax implies, with a generous safety
+        # margin for rejected/startup steps beyond the naive estimate.
+        if hmax > 0:
+            max_gap = np.max(np.diff(timeext)) if len(timeext) > 1 else (timeext[-1] - timeext[0])
+            mxstep = max(500, int(np.ceil(10 * max_gap / hmax)))
+        else:
+            mxstep = 0  # odeint's own default (500) - no forced small step here to budget for
+
+        # Belt-and-braces alongside the mxstep sizing above: if LSODA still
+        # exceeds its budget for some unanticipated reason, treat the
+        # resulting ODEintWarning as a hard failure rather than silently
+        # trusting a result that may be wrong past the point of failure -
+        # the returned array itself gives no indication anything went
+        # wrong (see note above), so the warning is the only signal.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", category=ODEintWarning)
+            try:
+                sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb),
+                             rtol=1e-9, atol=1e-9, hmax=hmax, h0=h0, mxstep=mxstep)
+            except ODEintWarning as exc:
+                raise DEBSolverError(
+                    "odeint failed to integrate the DEB model over the requested "
+                    "time grid (%s)" % exc
+                )
         # odeint also does not raise on a failed integration: it prints an
         # ODEPACK warning to stderr and still returns an array of the
         # expected shape, just filled with non-finite/garbage values past
-        # the point of failure. Check explicitly for that too.
+        # the point of failure. Check explicitly for that too (belt and
+        # braces alongside the ODEintWarning->error conversion above, in
+        # case some failure mode returns non-finite values without a
+        # warning).
         if (sol.shape != (len(timeext), len(y0))) or (not np.all(np.isfinite(sol))):
             raise DEBSolverError(
                 "odeint failed to integrate the DEB model over the requested "
