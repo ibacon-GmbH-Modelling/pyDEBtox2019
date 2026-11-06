@@ -73,7 +73,7 @@ def _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb):
     sMOA = moa * stress
     # need to avoid sA=1 as it will produce numerical issues
     # with a 0 denominator later in the code
-    EPS = 1e-12
+    EPS = 1e-6
     sMOA[0] = min(sMOA[0],1-EPS)
     sA,sM,sG,sR,sH = sMOA
     dydt[1] = rB * ((1+sM)/(1+sG)) * (f*Lm*((1-sA)/(1+sM)) - L)  # ODE for body length
