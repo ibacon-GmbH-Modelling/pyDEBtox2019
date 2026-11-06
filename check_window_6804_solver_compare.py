@@ -28,7 +28,7 @@ if __name__ == "__main__":
         DEBpars = json.load(json_file)
     debparameters = dt2019.DEBparameters(DEBpars)
 
-    moas   = np.array([0, 0, 1, 1, 0])   # <-- edit to match your model
+    moas   = np.array([1, 0, 0, 0, 0])   # assimilation-only ("10000") - confirm this matches your real run
     feedbs = np.array([0, 0, 0, 0])      # <-- edit to match your model
 
     Cdata = pd.read_csv(datapath + "Test_Cdata.txt", sep=r"\s+", header=None)
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     debparameters.preset_toxlimits(moas, feedbs, ccl)
 
     model = mm.DEBtox2019models(
-        [full_ds], debparameters, moas, feedbs, Tbp=3, breaktime=1, solver='LSODA',  # <-- edit Tbp/breaktime/solver to match your setup
+        [full_ds], debparameters, moas, feedbs, Tbp=3, breaktime=0, solver='LSODA',  # <-- edit Tbp/breaktime/solver to match your setup
     )
     # model.parvals is already set from your JSON's fitted values at this
     # point (same as input_pars_tbp3.json above) - no separate assignment
@@ -63,22 +63,26 @@ if __name__ == "__main__":
                               # to the unprotected original code - profile
                               # has a peak of 0.5852 starting at 7899.396)
     Twin = 21.0              # your Twin
-    # We don't know the exact before/after-gap MF bracket for this window
-    # yet, so sweep broadly (log-spaced) instead of needing it pinned down.
-    trial_MFs = tuple(sorted(set(
-        (1, 5, 10, 20, 29, 40, 50, 60, 69, 100, 300, 1000)
-        + tuple(np.round(np.logspace(0, 3, 120), 4))
-    )))
+    endpoints = (0, 1, 2)    # <-- edit to match your real calc_epx call (0=survival,1=length,2=repro)
+    X = (10, 50)             # <-- edit to match your real calc_epx call
+    MF_bounds = (1e-3, 1e3)  # <-- matches what you reported
+    max_expand = 60          # <-- edit if you changed it from the default
+    xtol = 1e-5              # <-- matches what you reported
+    plateau_tol = 1e-6       # <-- edit if you changed it from the default
 
     # =========================================================================
-    # COMPARISON - should not need editing below this line
+    # COMPARISON - replays _epx_window_task/_bisect_log EXACTLY (not a hand-
+    # picked MF grid), with every (MF, effect) pair it evaluates logged. This
+    # is the only way to see the actual sequence brentq homes in on, since
+    # that sequence is data-dependent and can land on values an external
+    # grid - however dense - would skip right over.
     # =========================================================================
     t_list, c_list = model._window_profile(
         np.asarray(exposure_time, dtype=float), np.asarray(exposure_conc, dtype=float),
         window_start, Twin,
     )
     modelpars = model.resolve_dataset_parameters(dataset, zero_hb=zero_hb)
-    timeext = np.linspace(0.0, Twin, 50)
+    timeext_dense = np.linspace(0.0, Twin, 50)
 
     print("window_start=%.4f  Twin=%.4f  n_profile_points=%d" % (window_start, Twin, len(t_list)))
     print("first few (t, c) pairs in the window profile (sanity check vs. the")
@@ -86,32 +90,53 @@ if __name__ == "__main__":
           % (7899.396 - window_start))
     for tt, cc in list(zip(t_list, c_list))[:8]:
         print("  t=%10.4f  c=%10.6f" % (tt, cc))
-    print("%-10s %-10s %-10s" % ("MF", "LSODA", "RK45"))
+
+    def run_bisection_traced(ep, x, solver_name):
+        si = model.ENDPOINT_STATE_IDX[ep]
+        control = model.calc_model(np.zeros(2), np.array([0.0, Twin]), modelpars,
+                                    model.moa, model.feedb, timeext=timeext_dense)[:, -1]
+        control_val = control[si]
+        target = x / 100.0
+        trace = []
+
+        def f(logMF):
+            MF = 10 ** logMF
+            try:
+                sol = model.calc_model(MF * c_list, t_list, modelpars, model.moa, model.feedb,
+                                        timeext=timeext_dense)
+                finite = bool(np.all(np.isfinite(sol)))
+                effect = 1.0 - sol[si, -1] / control_val
+                val = effect - target
+                trace.append((MF, val, finite, None))
+                return val
+            except Exception as e:
+                trace.append((MF, None, False, "%s: %s" % (type(e).__name__, e)))
+                raise
+
+        try:
+            root = model._bisect_log(f, MF_bounds[0], MF_bounds[1], max_expand, xtol,
+                                      increasing=True, plateau_tol=plateau_tol)
+            outcome = "root=%.6g" % root if np.isfinite(root) else "NaN (no valid root found)"
+        except Exception as e:
+            outcome = "RAISED %s: %s" % (type(e).__name__, e)
+
+        print("\n[%s] endpoint=%d X=%d%%  control_val=%.6g  -> %s  (%d f() evaluations)"
+              % (solver_name, ep, x, control_val, outcome, len(trace)))
+        for MF, val, finite, err in trace:
+            if err is not None:
+                print("    MF=%12.6f  EXCEPTION: %s" % (MF, err))
+            elif not finite:
+                print("    MF=%12.6f  SILENT NON-FINITE result (f() returned, but sol had NaN/inf)" % MF)
+            else:
+                print("    MF=%12.6f  effect-target=%12.6g" % (MF, val))
 
     original_solver = model.solver
     try:
-        for MF in trial_MFs:
-            model.solver = 'LSODA'
-            try:
-                res = model.calc_model(MF * c_list, t_list, modelpars, model.moa, model.feedb, timeext=timeext)
-                if np.all(np.isfinite(res)):
-                    lsoda_ok = "OK (final=%s)" % np.array2string(res[:, -1], precision=4)
-                else:
-                    lsoda_ok = "SILENT NON-FINITE (no exception raised, but result has NaN/inf)"
-            except Exception as e:
-                lsoda_ok = "FAIL (%s: %s)" % (type(e).__name__, e)
-
-            model.solver = 'RK45'
-            try:
-                res = model.calc_model(MF * c_list, t_list, modelpars, model.moa, model.feedb, timeext=timeext)
-                if np.all(np.isfinite(res)):
-                    rk45_ok = "OK (final=%s)" % np.array2string(res[:, -1], precision=4)
-                else:
-                    rk45_ok = "SILENT NON-FINITE (no exception raised, but result has NaN/inf)"
-            except Exception as e:
-                rk45_ok = "FAIL (%s: %s)" % (type(e).__name__, e)
-
-            print("%-10g %-10s %-10s" % (MF, lsoda_ok, rk45_ok))
+        for solver_name in ('LSODA', 'RK45'):
+            model.solver = solver_name
+            for ep in endpoints:
+                for x in X:
+                    run_bisection_traced(ep, x, solver_name)
     finally:
         model.solver = original_solver  # restore, in case the model object is reused afterward
 

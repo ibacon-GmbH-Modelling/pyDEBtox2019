@@ -129,8 +129,17 @@ def DEBtox2019_derivatives_solveivp(t, y, C, timextr, DEBpars, moa, feedb):
     return _DEBtox2019_derivatives_core(y, t, C, timextr, DEBpars, moa, feedb)
 
 
+# Cap on how many of timextr's own points calc_DEBresults will merge into
+# its solve grid (see there) - cheap insurance against a pathologically
+# long timextr (e.g. a full, long real exposure profile passed in directly
+# rather than pre-windowed) blowing up the grid size. calc_epx_core's
+# window extraction and normal dataset-fitting profiles are both
+# comfortably under this.
+_MAX_MERGE_POINTS = 2000
+
+
 def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
-                     min_t=500, max_step=None, first_step=None):
+                     min_t=500, max_step=None, first_step=None, lsoda_fallback=True):
     # L0 = DEBpars[5]
     # y0 = np.array([0., L0*1.0, 0., 1.])
     # TODO: test if we need a very extended time vector or it will be enough to use the union of
@@ -147,6 +156,24 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
     if (not np.all(np.isfinite(DEBpars))) or (not np.all(np.isfinite(y0))):
         raise DEBSolverError("calc_DEBresults received non-finite DEBpars or y0")
 
+    # Ask the solver for output at every known forcing breakpoint
+    # (timextr), not just the caller's requested timeext grid. t_eval only
+    # constrains *output* points, not internal stepping - irrelevant for
+    # solve_ivp, but for LSODA specifically, mxstep's step budget (below)
+    # applies PER REQUESTED OUTPUT INTERVAL. A wide interval that straddles
+    # a sharp concentration transition currently forces that whole
+    # transient to be resolved within one budget, with no interior
+    # checkpoint - merging in timextr gives LSODA a checkpoint at each
+    # known kink, cheaply (extra output points, not a solver restart).
+    need_remap = False
+    solve_grid = timeext
+    if 0 < len(timextr) <= _MAX_MERGE_POINTS:
+        clipped = timextr[(timextr >= timeext[0]) & (timextr <= timeext[-1])]
+        merged = np.union1d(timeext, clipped)
+        if merged.size != timeext.size:
+            solve_grid = merged
+            need_remap = True
+
     # max_step/first_step: an unconstrained adaptive solver can silently
     # step clean over a concentration feature narrower than its chosen
     # step size - t_eval/timeext only requests *output* points, it does
@@ -159,9 +186,10 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
     # - user-settable - self.min_t through here, and explicitly opts out
     # with max_step=np.inf for its breaktime=True segments, where no
     # protection is needed since each segment already spans only one
-    # profile interval).
+    # profile interval). Based on solve_grid rather than the raw timeext
+    # so it also reflects the tighter resolution from the merge above.
     if max_step is None:
-        span = timeext[-1] - timeext[0]
+        span = solve_grid[-1] - solve_grid[0]
         if span > 0:
             min_t_eff = max(min_t, 2 * len(timextr))
             max_step = span / min_t_eff
@@ -172,20 +200,23 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
 
     if solver=="RK45":
         # solve_ivp has the possibility to choose a different algorithm (default is RK45)
-        sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([timeext[0], timeext[-1]]), y0=y0,
-                args=(C, timextr, DEBpars, moa, feedb), t_eval=timeext, rtol=1e-9,atol=1e-9,
+        sol = solve_ivp(fun=DEBtox2019_derivatives_solveivp, t_span=np.array([solve_grid[0], solve_grid[-1]]), y0=y0,
+                args=(C, timextr, DEBpars, moa, feedb), t_eval=solve_grid, rtol=1e-9,atol=1e-9,
                 max_step=max_step, first_step=first_step)#, dense_output=True)
         # solve_ivp does NOT raise on a failed integration: on failure it
         # just sets sol.success=False and often returns a truncated sol.y
-        # (fewer columns than len(timeext)). Detect that explicitly here
+        # (fewer columns than len(solve_grid)). Detect that explicitly here
         # instead of letting some downstream indexing operation stumble
         # into it by accident.
-        if (not sol.success) or (sol.y.shape[1] != len(timeext)) or (not np.all(np.isfinite(sol.y))):
+        if (not sol.success) or (sol.y.shape[1] != len(solve_grid)) or (not np.all(np.isfinite(sol.y))):
             raise DEBSolverError(
                 "solve_ivp failed to integrate the DEB model over the requested "
                 "time grid (message: %s)" % sol.message
             )
-        return sol.y
+        result = sol.y
+        if need_remap:
+            result = result[:, np.searchsorted(solve_grid, timeext)]
+        return result
     elif solver=="LSODA":
         # odeint uses LSODA algorithm. hmax/h0 are its max-step/first-step
         # equivalents; 0 is odeint's own sentinel for "unconstrained"/"let
@@ -194,18 +225,19 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
         h0 = 0. if first_step is None else first_step
 
         # mxstep: LSODA's internal step budget applies PER REQUESTED OUTPUT
-        # INTERVAL (between consecutive timeext entries), not to the whole
-        # integration - and defaults to 500 if left unset (mxstep=0). When
-        # hmax forces a small step (above), covering the same interval
-        # needs proportionally more steps, which can exceed that default
-        # budget - LSODA then gives up early, emitting ODEintWarning
-        # ("Excess work done...") WITHOUT raising, and returns a result
-        # that is fully finite (so the isfinite check below does not catch
-        # it) but silently wrong past the point it gave up. Scale mxstep to
-        # the step budget our own hmax implies, with a generous safety
-        # margin for rejected/startup steps beyond the naive estimate.
+        # INTERVAL (between consecutive solve_grid entries), not to the
+        # whole integration - and defaults to 500 if left unset (mxstep=0).
+        # When hmax forces a small step (above), covering the same
+        # interval needs proportionally more steps, which can exceed that
+        # default budget - LSODA then gives up early, emitting
+        # ODEintWarning ("Excess work done...") WITHOUT raising, and
+        # returns a result that is fully finite (so the isfinite check
+        # below does not catch it) but silently wrong past the point it
+        # gave up. Scale mxstep to the step budget our own hmax implies,
+        # with a generous safety margin for rejected/startup steps beyond
+        # the naive estimate.
         if hmax > 0:
-            max_gap = np.max(np.diff(timeext)) if len(timeext) > 1 else (timeext[-1] - timeext[0])
+            max_gap = np.max(np.diff(solve_grid)) if len(solve_grid) > 1 else (solve_grid[-1] - solve_grid[0])
             mxstep = max(500, int(np.ceil(10 * max_gap / hmax)))
         else:
             mxstep = 0  # odeint's own default (500) - no forced small step here to budget for
@@ -215,30 +247,53 @@ def calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver='RK45',
         # resulting ODEintWarning as a hard failure rather than silently
         # trusting a result that may be wrong past the point of failure -
         # the returned array itself gives no indication anything went
-        # wrong (see note above), so the warning is the only signal.
+        # wrong (see note above), so the warning is the only signal. Even
+        # with that conversion, LSODA can still legitimately be too hard
+        # for a given stretch (e.g. a near-discontinuous forcing input) -
+        # see the lsoda_fallback handling below.
+        failure_reason = None
         with warnings.catch_warnings():
             warnings.filterwarnings("error", category=ODEintWarning)
             try:
-                sol = odeint(DEBtox2019_derivatives_odeint, y0, timeext, args=(C, timextr, DEBpars, moa, feedb),
+                sol = odeint(DEBtox2019_derivatives_odeint, y0, solve_grid, args=(C, timextr, DEBpars, moa, feedb),
                              rtol=1e-9, atol=1e-9, hmax=hmax, h0=h0, mxstep=mxstep)
             except ODEintWarning as exc:
-                raise DEBSolverError(
-                    "odeint failed to integrate the DEB model over the requested "
-                    "time grid (%s)" % exc
+                failure_reason = str(exc)
+        if failure_reason is None:
+            # odeint also does not raise on a failed integration: it prints an
+            # ODEPACK warning to stderr and still returns an array of the
+            # expected shape, just filled with non-finite/garbage values past
+            # the point of failure. Check explicitly for that too (belt and
+            # braces alongside the ODEintWarning->error conversion above, in
+            # case some failure mode returns non-finite values without a
+            # warning).
+            if (sol.shape != (len(solve_grid), len(y0))) or (not np.all(np.isfinite(sol))):
+                failure_reason = "non-finite or malformed result"
+
+        if failure_reason is not None:
+            if lsoda_fallback:
+                # LSODA is the fast, preferred solver and usually fine, but
+                # can legitimately stall on a sharp/near-discontinuous
+                # forcing input even with the protections above - retry
+                # this one call with RK45 rather than propagating the
+                # failure, so only the rare hard call pays the extra cost.
+                warnings.warn(
+                    "LSODA failed to integrate the DEB model over the requested "
+                    "time grid (%s); falling back to RK45 for this call." % failure_reason,
+                    RuntimeWarning,
                 )
-        # odeint also does not raise on a failed integration: it prints an
-        # ODEPACK warning to stderr and still returns an array of the
-        # expected shape, just filled with non-finite/garbage values past
-        # the point of failure. Check explicitly for that too (belt and
-        # braces alongside the ODEintWarning->error conversion above, in
-        # case some failure mode returns non-finite values without a
-        # warning).
-        if (sol.shape != (len(timeext), len(y0))) or (not np.all(np.isfinite(sol))):
+                return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext,
+                                        solver='RK45', min_t=min_t, max_step=max_step,
+                                        first_step=first_step, lsoda_fallback=lsoda_fallback)
             raise DEBSolverError(
                 "odeint failed to integrate the DEB model over the requested "
-                "time grid (non-finite or malformed result)"
+                "time grid (%s)" % failure_reason
             )
-        return sol.T
+
+        result = sol.T
+        if need_remap:
+            result = result[:, np.searchsorted(solve_grid, timeext)]
+        return result
     else:
         raise ValueError("Solver not recognized. Use 'RK45' or 'LSODA'.")
 
@@ -471,7 +526,8 @@ class DEBtox2019models:
                  Tbp = 0,
                  min_t=500,
                  solver ='LSODA',
-                 breaktime = False):
+                 breaktime = False,
+                 lsoda_fallback = True):
         '''
         Build a DEBtox2019models instance for one or more datasets.
 
@@ -499,6 +555,14 @@ class DEBtox2019models:
           between concentration time points, instead of over the whole
           time span at once (needed for some renewal/pulsed exposure
           designs). Default False.
+        - lsoda_fallback: if True (default), a solver='LSODA' call that
+          fails (see calc_DEBresults) is automatically retried once with
+          RK45 instead of raising - LSODA is fast and usually fine, but
+          can silently stall on a sharp/near-discontinuous forcing input;
+          the retry keeps the speed benefit on the common case while
+          still getting a correct answer on the rare hard one. Set False
+          to keep LSODA failures fatal (e.g. for benchmarking or strict
+          CI checks).
         '''
         self.debparameterclass = debparameterclass
         self.ndatasets = len(completedataset_list)  # number of datasets
@@ -528,6 +592,7 @@ class DEBtox2019models:
         self.min_t = min_t
         self.solver = solver
         self.breaktime = breaktime
+        self.lsoda_fallback = lsoda_fallback
         # deal with the actual data and concentration
         self.timeext = []
         self.newtimeext = []
@@ -678,7 +743,7 @@ class DEBtox2019models:
         # there) uses this model's own setting.
         if not self.breaktime and not apply_delay:
             return calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, timeext, solver=self.solver,
-                                    min_t=self.min_t)
+                                    min_t=self.min_t, lsoda_fallback=self.lsoda_fallback)
 
         # Merge the original time grid with the concentration-step times
         # (needed to align breaktime segments to C's own time points) and,
@@ -704,14 +769,14 @@ class DEBtox2019models:
                 # already spans only one profile interval by construction
                 # (that's the whole point of breaktime segmenting).
                 modelsl = calc_DEBresults(C[t:t+2], timextr[t:t+2]-timextr[t], y0, DEBpars, moa, feedb, shifted_tvec,
-                                           solver=self.solver, max_step=np.inf)
+                                           solver=self.solver, max_step=np.inf, lsoda_fallback=self.lsoda_fallback)
                 # print("Model solution for segment ", t, ": ", modelsl)
                 y0 = modelsl[:, -1]  # update initial condition for next segment
                 modelsol_union[:, (newtime >= timextr[t]) & (newtime <= timextr[t+1])] = modelsl
         else:
             # Solve once on the union grid
             modelsol_union = calc_DEBresults(C, timextr, y0, DEBpars, moa, feedb, newtime, solver=self.solver,
-                                              min_t=self.min_t)
+                                              min_t=self.min_t, lsoda_fallback=self.lsoda_fallback)
             # modelsol_union: shape (n_states, len(newtime))
 
         # We will rebuild the final solution strictly on the original timeext grid
